@@ -16,7 +16,7 @@ A production-oriented [NestJS](https://nestjs.com/) starter for a Mini ERP syste
 | Authorization        | Role-based access control (RBAC) with a global guard                   |
 | Password hashing     | bcrypt                                                                  |
 | Validation           | `class-validator` / `class-transformer` (global `ValidationPipe`)      |
-| Config               | `@nestjs/config` with Joi schema validation (fail-fast on boot)        |
+| Config               | `@nestjs/config` with Zod schema validation (fail-fast on boot)        |
 | API Documentation    | Swagger / OpenAPI (`@nestjs/swagger`)                                   |
 | Health checks        | `@nestjs/terminus` (database ping)                                     |
 | Security             | Helmet, CORS                                                            |
@@ -134,7 +134,7 @@ src/
 │   ├── guards/             # JwtAuthGuard (authn), RolesGuard (authz)
 │   ├── interceptors/       # Response transform ({ success, data })
 │   └── types/              # Shared types (AuthenticatedUser)
-├── config/                 # Typed configuration + Joi env validation
+├── config/                 # Typed configuration + Zod env validation
 ├── prisma/                 # PrismaModule + PrismaService (data-access layer)
 ├── modules/                # Feature modules (one folder per bounded context)
 │   ├── auth/               # Registration, login, refresh, JWT strategy
@@ -162,7 +162,7 @@ prisma/
 
 - **Authorization via a global RBAC guard.** `JwtAuthGuard` is applied globally (opt out per route with `@Public()`); `RolesGuard` enforces `@Roles(...)`. Roles live in the Prisma `Role` enum (`ADMIN`, `MANAGER`, `USER`).
 
-- **Fail-fast configuration.** Environment variables are validated against a Joi schema at startup, so misconfiguration surfaces immediately instead of at the first request.
+- **Fail-fast configuration.** Environment variables are validated against a Zod schema at startup, so misconfiguration surfaces immediately instead of at the first request.
 
 - **Uniform API contract.** A global interceptor wraps successes as `{ success: true, data }` and a global exception filter renders every error in a single predictable shape, so clients integrate against one consistent envelope.
 

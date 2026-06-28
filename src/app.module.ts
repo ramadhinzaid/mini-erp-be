@@ -6,7 +6,7 @@ import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import configuration from './config/configuration';
-import { envValidationSchema } from './config/env.validation';
+import { validateEnv } from './config/env.validation';
 import { AuthModule } from './modules/auth/auth.module';
 import { HealthModule } from './modules/health/health.module';
 import { UsersModule } from './modules/users/users.module';
@@ -19,8 +19,7 @@ import { PrismaModule } from './prisma/prisma.module';
       isGlobal: true,
       cache: true,
       load: [configuration],
-      validationSchema: envValidationSchema,
-      validationOptions: { abortEarly: false },
+      validate: validateEnv,
     }),
     PrismaModule,
     AuthModule,

@@ -1,24 +1,46 @@
-import * as Joi from 'joi';
+import { z } from 'zod';
 
 /**
- * Schema used by `@nestjs/config` to validate the process environment at
- * startup. The application fails fast (refuses to boot) when a required
- * variable is missing or malformed, which keeps misconfiguration out of
+ * Zod schema describing the process environment. Passed to `@nestjs/config` via
+ * the `validate` hook so the application fails fast (refuses to boot) when a
+ * required variable is missing or malformed, keeping misconfiguration out of
  * production.
  */
-export const envValidationSchema = Joi.object({
-  NODE_ENV: Joi.string()
-    .valid('development', 'test', 'production')
+const envSchema = z.object({
+  NODE_ENV: z
+    .enum(['development', 'test', 'production'])
     .default('development'),
-  PORT: Joi.number().port().default(3000),
-  API_PREFIX: Joi.string().default('api'),
+  PORT: z.coerce.number().int().positive().max(65535).default(3000),
+  API_PREFIX: z.string().min(1).default('api'),
 
-  DATABASE_URL: Joi.string()
-    .uri({ scheme: ['postgres', 'postgresql'] })
-    .required(),
+  DATABASE_URL: z
+    .string()
+    .regex(
+      /^postgres(ql)?:\/\/.+/,
+      'must be a valid PostgreSQL connection string',
+    ),
 
-  JWT_ACCESS_SECRET: Joi.string().min(16).required(),
-  JWT_ACCESS_EXPIRES_IN: Joi.string().default('15m'),
-  JWT_REFRESH_SECRET: Joi.string().min(16).required(),
-  JWT_REFRESH_EXPIRES_IN: Joi.string().default('7d'),
+  JWT_ACCESS_SECRET: z.string().min(16),
+  JWT_ACCESS_EXPIRES_IN: z.string().min(1).default('15m'),
+  JWT_REFRESH_SECRET: z.string().min(16),
+  JWT_REFRESH_EXPIRES_IN: z.string().min(1).default('7d'),
 });
+
+export type EnvVars = z.infer<typeof envSchema>;
+
+/**
+ * Validates the raw environment. Throws an aggregated, human-readable error
+ * listing every invalid variable (not just the first) when validation fails.
+ */
+export function validateEnv(config: Record<string, unknown>): EnvVars {
+  const result = envSchema.safeParse(config);
+
+  if (!result.success) {
+    const issues = result.error.issues
+      .map((issue) => `${issue.path.join('.') || 'env'}: ${issue.message}`)
+      .join('; ');
+    throw new Error(`Environment validation failed — ${issues}`);
+  }
+
+  return result.data;
+}

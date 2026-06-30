@@ -102,6 +102,69 @@ describe('AuthService', () => {
         service.login({ email: 'nobody@example.com', password: 'whatever12' }),
       ).rejects.toBeInstanceOf(UnauthorizedException);
     });
+
+    it('rejects inactive accounts even with the correct password', async () => {
+      const password = 'PlainPass123!';
+      usersService.findByEmail.mockResolvedValue({
+        ...userModel,
+        isActive: false,
+        password: await bcrypt.hash(password, 10),
+      });
+
+      await expect(
+        service.login({ email: userModel.email, password }),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+      // No tokens should be issued for a rejected login.
+      expect(jwtService.signAsync).not.toHaveBeenCalled();
+    });
+
+    it('uses the same error message for every failed login factor', async () => {
+      // Unknown email.
+      usersService.findByEmail.mockResolvedValueOnce(null);
+      const unknownEmailError = await service
+        .login({ email: 'nobody@example.com', password: 'whatever12' })
+        .catch((err: UnauthorizedException) => err);
+
+      // Wrong password.
+      usersService.findByEmail.mockResolvedValueOnce({
+        ...userModel,
+        password: await bcrypt.hash('the-real-password', 10),
+      });
+      const wrongPasswordError = await service
+        .login({ email: userModel.email, password: 'wrong-password' })
+        .catch((err: UnauthorizedException) => err);
+
+      // Inactive account.
+      usersService.findByEmail.mockResolvedValueOnce({
+        ...userModel,
+        isActive: false,
+        password: await bcrypt.hash('PlainPass123!', 10),
+      });
+      const inactiveError = await service
+        .login({ email: userModel.email, password: 'PlainPass123!' })
+        .catch((err: UnauthorizedException) => err);
+
+      expect(unknownEmailError).toBeInstanceOf(UnauthorizedException);
+      expect(wrongPasswordError.message).toBe(unknownEmailError.message);
+      expect(inactiveError.message).toBe(unknownEmailError.message);
+    });
+
+    it('never includes the password hash in the issued token response', async () => {
+      const password = 'PlainPass123!';
+      usersService.findByEmail.mockResolvedValue({
+        ...userModel,
+        password: await bcrypt.hash(password, 10),
+      });
+
+      const tokens = await service.login({ email: userModel.email, password });
+
+      expect(tokens).toEqual({
+        accessToken: 'signed-token',
+        refreshToken: 'signed-token',
+        tokenType: 'Bearer',
+      });
+      expect(Object.keys(tokens)).not.toContain('password');
+    });
   });
 
   describe('refresh', () => {

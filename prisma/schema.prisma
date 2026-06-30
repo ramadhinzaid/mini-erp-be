@@ -33,3 +33,21 @@ model User {
   @@index([email])
   @@map("users")
 }
+
+/// A customer in the invoicing domain. Readable by any authenticated user;
+/// mutations are restricted to ADMIN / MANAGER (see CustomersController).
+model Customer {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  email     String?
+  phone     String?
+  company   String?
+  address   String?
+  notes     String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([email])
+  @@map("customers")
+}

@@ -8,6 +8,7 @@ import { TransformInterceptor } from './common/interceptors/transform.intercepto
 import configuration from './config/configuration';
 import { validateEnv } from './config/env.validation';
 import { AuthModule } from './modules/auth/auth.module';
+import { CustomersModule } from './modules/customers/customers.module';
 import { HealthModule } from './modules/health/health.module';
 import { UsersModule } from './modules/users/users.module';
 import { PrismaModule } from './prisma/prisma.module';
@@ -24,6 +25,7 @@ import { PrismaModule } from './prisma/prisma.module';
     PrismaModule,
     AuthModule,
     UsersModule,
+    CustomersModule,
     HealthModule,
   ],
   providers: [

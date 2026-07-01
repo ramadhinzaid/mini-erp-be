@@ -110,6 +110,51 @@ curl http://localhost:3000/api/auth/me \
 
 ---
 
+## API Endpoints
+
+All routes are mounted under the `API_PREFIX` (default `api`) and require a valid
+bearer access token unless marked **Public**. Authorization is enforced by the
+global `RolesGuard`; the **Roles** column lists who may call each route (any
+authenticated user when blank).
+
+### Auth (`/api/auth`)
+
+| Method & Path             | Roles    | Description                              |
+| ------------------------- | -------- | ---------------------------------------- |
+| `POST /auth/register`     | Public   | Register a user, returns a token pair    |
+| `POST /auth/login`        | Public   | Log in, returns an access + refresh pair |
+| `POST /auth/refresh`      | Public   | Exchange a refresh token for a new pair  |
+| `GET  /auth/me`           | —        | Current authenticated user's profile     |
+
+### Users (`/api/users`)
+
+| Method & Path        | Roles            | Description                |
+| -------------------- | ---------------- | -------------------------- |
+| `POST /users`        | `ADMIN`          | Create a user              |
+| `GET  /users`        | `ADMIN`,`MANAGER`| List users (paginated)     |
+| `GET  /users/:id`    | `ADMIN`,`MANAGER`| Get a user by id           |
+| `PATCH /users/:id`   | `ADMIN`          | Update a user              |
+| `DELETE /users/:id`  | `ADMIN`          | Delete a user (`204`)      |
+
+### Customers (`/api/customers`)
+
+Customers belong to the invoicing domain: any authenticated user may read them,
+while mutations are restricted to `ADMIN` / `MANAGER` (deletes are `ADMIN`-only).
+
+| Method & Path            | Roles             | Description                                              |
+| ------------------------ | ----------------- | ------------------------------------------------------- |
+| `POST /customers`        | `ADMIN`,`MANAGER` | Create a customer                                       |
+| `GET  /customers`        | —                 | List customers (paginated; optional `?search=` on name/email/company) |
+| `GET  /customers/:id`    | —                 | Get a customer by id (`404` when missing)               |
+| `PATCH /customers/:id`   | `ADMIN`,`MANAGER` | Update a customer                                       |
+| `DELETE /customers/:id`  | `ADMIN`           | Delete a customer (`204 No Content`)                    |
+
+List endpoints accept `?page=` and `?limit=` (1–100) and return a
+`{ data, meta: { page, limit, total, totalPages } }` payload inside the standard
+`{ success, data }` envelope.
+
+---
+
 ## Testing
 
 Tests are a first-class part of this project — **every feature ships with tests**.
@@ -139,6 +184,7 @@ src/
 ├── modules/                # Feature modules (one folder per bounded context)
 │   ├── auth/               # Registration, login, refresh, JWT strategy
 │   ├── users/              # User CRUD, password hashing
+│   ├── customers/          # Customer CRUD (invoicing domain)
 │   └── health/             # Liveness/readiness probe
 ├── app.module.ts           # Composition root; wires global guards/filters
 └── main.ts                 # Bootstrap: pipes, Swagger, security, shutdown hooks

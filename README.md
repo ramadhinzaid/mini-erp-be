@@ -153,6 +153,39 @@ List endpoints accept `?page=` and `?limit=` (1–100) and return a
 `{ data, meta: { page, limit, total, totalPages } }` payload inside the standard
 `{ success, data }` envelope.
 
+### Invoices (`/api/invoices`)
+
+Invoices are the core of the ERP's billing domain. Any authenticated user may
+read them; creation is restricted to `ADMIN` / `MANAGER`. This module is the
+**foundation** — later features (add/update line items, status transitions, the
+event history and dashboards) extend this same module and its schema.
+
+| Method & Path          | Roles             | Description                                              |
+| ---------------------- | ----------------- | ------------------------------------------------------- |
+| `POST /invoices`       | `ADMIN`,`MANAGER` | Create an invoice with optional inline line items       |
+| `GET  /invoices/:id`   | —                 | Get an invoice by id, including its items (`404` when missing) |
+
+Behaviour and rules:
+
+- **Auto invoice number.** Each invoice gets a unique `INV-<year>-<sequence>`
+  number (e.g. `INV-2026-0001`), where the sequence resets per issue year and is
+  zero-padded to four digits.
+- **Money as `Decimal`, single currency.** `POST /invoices` accepts
+  `customerId` (must reference an existing customer, else `404`), optional
+  `dueDate`, `notes`, `taxRate` (percentage, `0–100`) and an optional inline
+  `items[]` (`description`, positive `quantity`, positive `unitPrice`). The
+  service derives every money field: `lineTotal = quantity × unitPrice`,
+  `subtotal = Σ lineTotal`, `taxAmount = round(subtotal × taxRate ÷ 100, 2)` and
+  `total = subtotal + taxAmount`.
+- **Audit trail.** Creation and every future mutation are written as append-only
+  `InvoiceEvent` rows; this plan records the initial `CREATED` event.
+
+**Schema.** `Invoice` (status `DRAFT`/`SENT`/`PAID`/`VOID`/`OVERDUE`, defaulting
+to `DRAFT`) has many `InvoiceItem` and many `InvoiceEvent` rows (both cascade on
+delete) and belongs to a `Customer`. Reusable helpers `computeInvoiceTotals`
+(recompute totals) and `appendInvoiceEvent` (write an event within a
+transaction) are exported from `invoices.service.ts` for the follow-up plans.
+
 ---
 
 ## Testing
@@ -185,6 +218,7 @@ src/
 │   ├── auth/               # Registration, login, refresh, JWT strategy
 │   ├── users/              # User CRUD, password hashing
 │   ├── customers/          # Customer CRUD (invoicing domain)
+│   ├── invoices/           # Invoice creation + retrieval (billing foundation)
 │   └── health/             # Liveness/readiness probe
 ├── app.module.ts           # Composition root; wires global guards/filters
 └── main.ts                 # Bootstrap: pipes, Swagger, security, shutdown hooks

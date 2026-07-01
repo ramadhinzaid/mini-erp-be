@@ -37,17 +37,102 @@ model User {
 /// A customer in the invoicing domain. Readable by any authenticated user;
 /// mutations are restricted to ADMIN / MANAGER (see CustomersController).
 model Customer {
-  id        String   @id @default(uuid()) @db.Uuid
+  id        String    @id @default(uuid()) @db.Uuid
   name      String
   email     String?
   phone     String?
   company   String?
   address   String?
   notes     String?
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  invoices  Invoice[]
 
   @@index([email])
   @@map("customers")
+}
+
+/// Lifecycle state of an invoice. Read by any authenticated user; DRAFT is the
+/// initial state on creation. VOID is a terminal, ADMIN-only transition.
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PAID
+  VOID
+  OVERDUE
+}
+
+/// Audit-log event kinds recorded against an invoice. The invoice-foundation
+/// plan only writes CREATED; later plans emit the rest.
+enum InvoiceEventType {
+  CREATED
+  UPDATED
+  STATUS_CHANGED
+  ITEM_ADDED
+  ITEM_UPDATED
+  ITEM_REMOVED
+}
+
+/// An invoice for a customer. Money is stored as Decimal in a single currency.
+/// Totals (subtotal/taxAmount/total) are derived from the line items and kept
+/// in sync by the service layer. Readable by any authenticated user; create and
+/// mutations are ADMIN / MANAGER, void/delete are ADMIN (see InvoicesController).
+model Invoice {
+  id         String         @id @default(uuid()) @db.Uuid
+  /// Human-facing sequential number, e.g. INV-2026-0001. Generated per issue year.
+  number     String         @unique
+  customerId String         @db.Uuid
+  customer   Customer       @relation(fields: [customerId], references: [id])
+  status     InvoiceStatus  @default(DRAFT)
+  issueDate  DateTime       @default(now())
+  dueDate    DateTime?
+  notes      String?
+  /// Tax rate as a percentage, e.g. 11.00 means 11%.
+  taxRate    Decimal        @default(0) @db.Decimal(5, 2)
+  subtotal   Decimal        @default(0) @db.Decimal(12, 2)
+  taxAmount  Decimal        @default(0) @db.Decimal(12, 2)
+  total      Decimal        @default(0) @db.Decimal(12, 2)
+  items      InvoiceItem[]
+  events     InvoiceEvent[]
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+
+  @@index([customerId])
+  @@index([status])
+  @@map("invoices")
+}
+
+/// A single line on an invoice. `lineTotal` = `quantity` * `unitPrice`, kept in
+/// sync by the service layer. Deleting the invoice cascades to its items.
+model InvoiceItem {
+  id          String   @id @default(uuid()) @db.Uuid
+  invoiceId   String   @db.Uuid
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  description String
+  quantity    Decimal  @db.Decimal(12, 2)
+  unitPrice   Decimal  @db.Decimal(12, 2)
+  lineTotal   Decimal  @db.Decimal(12, 2)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([invoiceId])
+  @@map("invoice_items")
+}
+
+/// An append-only audit event on an invoice (creation, status changes, item
+/// edits). Deleting the invoice cascades to its events.
+model InvoiceEvent {
+  id          String           @id @default(uuid()) @db.Uuid
+  invoiceId   String           @db.Uuid
+  invoice     Invoice          @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  type        InvoiceEventType
+  fromStatus  InvoiceStatus?
+  toStatus    InvoiceStatus?
+  message     String?
+  actorUserId String?          @db.Uuid
+  createdAt   DateTime         @default(now())
+
+  @@index([invoiceId])
+  @@map("invoice_events")
 }

@@ -10,6 +10,7 @@ import { validateEnv } from './config/env.validation';
 import { AuthModule } from './modules/auth/auth.module';
 import { CustomersModule } from './modules/customers/customers.module';
 import { HealthModule } from './modules/health/health.module';
+import { InvoicesModule } from './modules/invoices/invoices.module';
 import { UsersModule } from './modules/users/users.module';
 import { PrismaModule } from './prisma/prisma.module';
 
@@ -26,6 +27,7 @@ import { PrismaModule } from './prisma/prisma.module';
     AuthModule,
     UsersModule,
     CustomersModule,
+    InvoicesModule,
     HealthModule,
   ],
   providers: [

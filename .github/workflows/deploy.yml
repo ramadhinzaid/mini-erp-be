@@ -1,0 +1,18 @@
+name: Deploy API
+
+# Auto-deploy ke laptop-server tiap ada push ke main.
+# Berjalan di self-hosted runner yang terpasang di laptop (outbound -> aman untuk CGNAT).
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-api
+  cancel-in-progress: true   # deploy baru membatalkan yang masih antre
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    steps:
+      - name: Redeploy API di server
+        run: /home/ramadhin-zaid/deploy/redeploy.sh api

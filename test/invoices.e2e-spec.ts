@@ -97,7 +97,12 @@ describe('Invoices (e2e)', () => {
       ),
     },
     customer: { findUnique: jest.fn() },
-    invoice: { count: jest.fn(), create: jest.fn(), findUnique: jest.fn() },
+    invoice: {
+      count: jest.fn(),
+      create: jest.fn(),
+      findUnique: jest.fn(),
+      update: jest.fn(),
+    },
     invoiceEvent: { create: jest.fn() },
     $transaction: jest.fn(),
   };
@@ -145,6 +150,7 @@ describe('Invoices (e2e)', () => {
     prismaStub.invoice.count.mockReset();
     prismaStub.invoice.create.mockReset();
     prismaStub.invoice.findUnique.mockReset();
+    prismaStub.invoice.update.mockReset();
     prismaStub.invoiceEvent.create.mockReset();
     // Run service transactions against the same stub.
     prismaStub.$transaction.mockImplementation(
@@ -298,6 +304,161 @@ describe('Invoices (e2e)', () => {
         .get('/api/invoices/not-a-uuid')
         .set('Authorization', `Bearer ${token}`)
         .expect(400);
+    });
+  });
+
+  describe('updateStatus (PATCH /:id/status)', () => {
+    /** Stubs an existing invoice in `status` and echoes updates back. */
+    const arrange = (status: InvoiceStatus, overrides = {}) => {
+      prismaStub.invoice.findUnique.mockResolvedValue(
+        buildInvoice({ status, ...overrides }),
+      );
+      prismaStub.invoice.update.mockImplementation(
+        ({ data }: { data: { status: InvoiceStatus } }) =>
+          Promise.resolve(buildInvoice({ status: data.status, ...overrides })),
+      );
+      prismaStub.invoiceEvent.create.mockResolvedValue({});
+    };
+
+    it('PATCH without a token → 401', () => {
+      return request(server())
+        .patch(`/api/invoices/${invoiceId}/status`)
+        .send({ status: InvoiceStatus.SENT })
+        .expect(401);
+    });
+
+    it('ADMIN transitions DRAFT → SENT → 200 and logs the event', async () => {
+      const token = await tokenFor(admin);
+      arrange(InvoiceStatus.DRAFT);
+
+      const res = await request(server())
+        .patch(`/api/invoices/${invoiceId}/status`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ status: InvoiceStatus.SENT })
+        .expect(200);
+
+      const body = res.body as {
+        data: { status: string; displayStatus: string };
+      };
+      expect(body.data.status).toBe(InvoiceStatus.SENT);
+      expect(prismaStub.invoiceEvent.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('MANAGER transitions SENT → PAID → 200', async () => {
+      const token = await tokenFor(manager);
+      arrange(InvoiceStatus.SENT);
+
+      const res = await request(server())
+        .patch(`/api/invoices/${invoiceId}/status`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ status: InvoiceStatus.PAID })
+        .expect(200);
+
+      expect((res.body as { data: { status: string } }).data.status).toBe(
+        InvoiceStatus.PAID,
+      );
+    });
+
+    it('surfaces derived OVERDUE as displayStatus on a past-due SENT invoice', async () => {
+      const token = await tokenFor(regularUser);
+      prismaStub.invoice.findUnique.mockResolvedValue(
+        buildInvoice({
+          status: InvoiceStatus.SENT,
+          dueDate: new Date('2000-01-01T00:00:00Z'),
+        }),
+      );
+
+      const res = await request(server())
+        .get(`/api/invoices/${invoiceId}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+
+      const body = res.body as {
+        data: { status: string; displayStatus: string };
+      };
+      expect(body.data.status).toBe(InvoiceStatus.SENT);
+      expect(body.data.displayStatus).toBe(InvoiceStatus.OVERDUE);
+    });
+
+    it('illegal transition PAID → SENT → 409', async () => {
+      const token = await tokenFor(admin);
+      arrange(InvoiceStatus.PAID);
+
+      await request(server())
+        .patch(`/api/invoices/${invoiceId}/status`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ status: InvoiceStatus.SENT })
+        .expect(409);
+      expect(prismaStub.invoice.update).not.toHaveBeenCalled();
+    });
+
+    it('client-supplied OVERDUE → 400', async () => {
+      const token = await tokenFor(admin);
+      arrange(InvoiceStatus.SENT);
+
+      await request(server())
+        .patch(`/api/invoices/${invoiceId}/status`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ status: InvoiceStatus.OVERDUE })
+        .expect(400);
+      expect(prismaStub.invoice.update).not.toHaveBeenCalled();
+    });
+
+    it('unknown status value → 400', async () => {
+      const token = await tokenFor(admin);
+      await request(server())
+        .patch(`/api/invoices/${invoiceId}/status`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ status: 'ARCHIVED' })
+        .expect(400);
+    });
+
+    it('USER attempting a status change → 403', async () => {
+      const token = await tokenFor(regularUser);
+      await request(server())
+        .patch(`/api/invoices/${invoiceId}/status`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ status: InvoiceStatus.SENT })
+        .expect(403);
+      expect(prismaStub.invoice.update).not.toHaveBeenCalled();
+    });
+
+    it('non-admin (MANAGER) voiding an invoice → 403', async () => {
+      const token = await tokenFor(manager);
+      arrange(InvoiceStatus.SENT);
+
+      await request(server())
+        .patch(`/api/invoices/${invoiceId}/status`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ status: InvoiceStatus.VOID })
+        .expect(403);
+      expect(prismaStub.invoice.update).not.toHaveBeenCalled();
+    });
+
+    it('ADMIN voiding a DRAFT invoice → 200', async () => {
+      const token = await tokenFor(admin);
+      arrange(InvoiceStatus.DRAFT);
+
+      const res = await request(server())
+        .patch(`/api/invoices/${invoiceId}/status`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ status: InvoiceStatus.VOID })
+        .expect(200);
+
+      expect((res.body as { data: { status: string } }).data.status).toBe(
+        InvoiceStatus.VOID,
+      );
+    });
+
+    it('404 when the invoice does not exist', async () => {
+      const token = await tokenFor(admin);
+      prismaStub.invoice.findUnique.mockResolvedValue(null);
+
+      await request(server())
+        .patch(`/api/invoices/${invoiceId}/status`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ status: InvoiceStatus.SENT })
+        .expect(404);
     });
   });
 });

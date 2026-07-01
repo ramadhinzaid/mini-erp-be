@@ -4,13 +4,16 @@ import {
   Get,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Role } from '@prisma/client';
 import { CurrentUser } from 'src/common/decorators/current-user.decorator';
 import { Roles } from 'src/common/decorators/roles.decorator';
+import type { AuthenticatedUser } from 'src/common/types/authenticated-user';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
+import { UpdateInvoiceStatusDto } from './dto/update-invoice-status.dto';
 import { InvoicesService } from './invoices.service';
 
 /**
@@ -37,5 +40,23 @@ export class InvoicesController {
   @ApiOperation({ summary: 'Get an invoice by id (with items)' })
   findOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.invoicesService.findById(id);
+  }
+
+  @Patch(':id/status')
+  @Roles(Role.ADMIN, Role.MANAGER)
+  @ApiOperation({
+    summary: 'Transition an invoice status (admin/manager; VOID admin-only)',
+    description:
+      'Allowed manual transitions: DRAFT→SENT, DRAFT→VOID, SENT→PAID, ' +
+      'SENT→VOID. PAID and VOID are terminal. Illegal transitions return 409. ' +
+      'VOID is restricted to ADMIN (403 otherwise). OVERDUE is derived and ' +
+      'rejected as manual input (400).',
+  })
+  updateStatus(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateInvoiceStatusDto,
+    @CurrentUser() actor: AuthenticatedUser,
+  ) {
+    return this.invoicesService.updateStatus(id, dto.status, actor);
   }
 }

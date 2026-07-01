@@ -160,10 +160,11 @@ read them; creation is restricted to `ADMIN` / `MANAGER`. This module is the
 **foundation** — later features (add/update line items, status transitions, the
 event history and dashboards) extend this same module and its schema.
 
-| Method & Path          | Roles             | Description                                              |
-| ---------------------- | ----------------- | ------------------------------------------------------- |
-| `POST /invoices`       | `ADMIN`,`MANAGER` | Create an invoice with optional inline line items       |
-| `GET  /invoices/:id`   | —                 | Get an invoice by id, including its items (`404` when missing) |
+| Method & Path                | Roles             | Description                                              |
+| ---------------------------- | ----------------- | ------------------------------------------------------- |
+| `POST  /invoices`            | `ADMIN`,`MANAGER` | Create an invoice with optional inline line items       |
+| `GET   /invoices/:id`        | —                 | Get an invoice by id, including its items (`404` when missing) |
+| `PATCH /invoices/:id/status` | `ADMIN`,`MANAGER` | Transition the invoice status (`VOID` is `ADMIN`-only)  |
 
 Behaviour and rules:
 
@@ -177,14 +178,38 @@ Behaviour and rules:
   service derives every money field: `lineTotal = quantity × unitPrice`,
   `subtotal = Σ lineTotal`, `taxAmount = round(subtotal × taxRate ÷ 100, 2)` and
   `total = subtotal + taxAmount`.
+- **Status lifecycle.** `PATCH /invoices/:id/status` moves an invoice through a
+  fixed lifecycle. Body: `{ "status": "SENT" }`, validated against
+  `InvoiceStatus`. Allowed **manual** transitions:
+
+  | From    | Allowed target(s) |
+  | ------- | ----------------- |
+  | `DRAFT` | `SENT`, `VOID`    |
+  | `SENT`  | `PAID`, `VOID`    |
+  | `PAID`  | — (terminal)      |
+  | `VOID`  | — (terminal)      |
+
+  Any transition outside this matrix returns **`409 Conflict`**. `VOID` is
+  restricted to `ADMIN` (a `MANAGER` attempting it gets **`403`**); every other
+  transition is `ADMIN`/`MANAGER`. `OVERDUE` is **never set manually** — a
+  client-supplied `OVERDUE` is rejected with **`400`**. Each successful change
+  persists the new `status` and appends a `STATUS_CHANGED` `InvoiceEvent`
+  (`fromStatus`, `toStatus`, `actorUserId`).
+- **Derived `OVERDUE`.** Reads (`GET /invoices/:id`) expose a `displayStatus`
+  alongside the stored `status`: a `SENT` invoice whose `dueDate` is in the past
+  reads as `OVERDUE`, while `status` keeps its stored value. This is computed on
+  read via `deriveDisplayStatus` and never written to the database.
 - **Audit trail.** Creation and every future mutation are written as append-only
-  `InvoiceEvent` rows; this plan records the initial `CREATED` event.
+  `InvoiceEvent` rows; this plan records the initial `CREATED` event and a
+  `STATUS_CHANGED` event on each transition.
 
 **Schema.** `Invoice` (status `DRAFT`/`SENT`/`PAID`/`VOID`/`OVERDUE`, defaulting
 to `DRAFT`) has many `InvoiceItem` and many `InvoiceEvent` rows (both cascade on
 delete) and belongs to a `Customer`. Reusable helpers `computeInvoiceTotals`
-(recompute totals) and `appendInvoiceEvent` (write an event within a
-transaction) are exported from `invoices.service.ts` for the follow-up plans.
+(recompute totals), `appendInvoiceEvent` (write an event within a transaction),
+`isTransitionAllowed` (lifecycle matrix predicate) and `deriveDisplayStatus`
+(derive the `OVERDUE` display state) are exported from `invoices.service.ts` for
+the follow-up plans.
 
 ---
 

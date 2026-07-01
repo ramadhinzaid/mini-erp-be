@@ -5,18 +5,20 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Role } from '@prisma/client';
 import { CurrentUser } from 'src/common/decorators/current-user.decorator';
 import { Roles } from 'src/common/decorators/roles.decorator';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
+import { QueryInvoicesDto } from './dto/query-invoices.dto';
 import { InvoicesService } from './invoices.service';
 
 /**
- * HTTP surface for the invoice domain. Kept intentionally minimal — this is the
- * foundation; listing, item mutations, status transitions and events arrive in
- * later plans.
+ * HTTP surface for the invoice domain. Mutations (create/items/status) are
+ * ADMIN / MANAGER; the read endpoints — get-by-id, the paginated list and the
+ * per-invoice audit trail — are open to any authenticated user.
  */
 @ApiTags('Invoices')
 @ApiBearerAuth()
@@ -33,9 +35,26 @@ export class InvoicesController {
     return this.invoicesService.create(dto, userId);
   }
 
+  @Get()
+  @ApiOperation({
+    summary:
+      'List invoices (paginated; filter by status, customer, number, date range)',
+  })
+  findAll(@Query() query: QueryInvoicesDto) {
+    return this.invoicesService.findAll(query);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get an invoice by id (with items)' })
   findOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.invoicesService.findById(id);
+  }
+
+  @Get(':id/events')
+  @ApiOperation({
+    summary: 'Get an invoice audit trail (events ordered oldest first)',
+  })
+  findEvents(@Param('id', ParseUUIDPipe) id: string) {
+    return this.invoicesService.findEvents(id);
   }
 }

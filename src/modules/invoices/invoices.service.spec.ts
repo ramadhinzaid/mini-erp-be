@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { ConflictException, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { InvoiceEventType, InvoiceStatus, Prisma } from '@prisma/client';
 import { PrismaService } from 'src/prisma/prisma.service';
@@ -8,6 +8,19 @@ import { computeInvoiceTotals, InvoicesService } from './invoices.service';
 const customerId = '11111111-1111-1111-1111-111111111111';
 const invoiceId = '33333333-3333-3333-3333-333333333333';
 const actorId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+
+/** Builds a persisted invoice line item as Prisma would return it. */
+const buildItem = (overrides: Record<string, unknown> = {}) => ({
+  id: 'item-1',
+  invoiceId,
+  description: 'Consulting',
+  quantity: new Prisma.Decimal(2),
+  unitPrice: new Prisma.Decimal(150.5),
+  lineTotal: new Prisma.Decimal(301),
+  createdAt: new Date('2026-07-01T00:00:00Z'),
+  updatedAt: new Date('2026-07-01T00:00:00Z'),
+  ...overrides,
+});
 
 /** Builds a persisted invoice model as Prisma would return it. */
 const buildInvoice = (overrides: Record<string, unknown> = {}) => ({
@@ -32,7 +45,18 @@ describe('InvoicesService', () => {
   let service: InvoicesService;
   let tx: {
     customer: { findUnique: jest.Mock };
-    invoice: { count: jest.Mock; create: jest.Mock };
+    invoice: {
+      count: jest.Mock;
+      create: jest.Mock;
+      findUnique: jest.Mock;
+      update: jest.Mock;
+    };
+    invoiceItem: {
+      create: jest.Mock;
+      update: jest.Mock;
+      delete: jest.Mock;
+      findMany: jest.Mock;
+    };
     invoiceEvent: { create: jest.Mock };
   };
   let prisma: {
@@ -43,7 +67,18 @@ describe('InvoicesService', () => {
   beforeEach(async () => {
     tx = {
       customer: { findUnique: jest.fn().mockResolvedValue({ id: customerId }) },
-      invoice: { count: jest.fn().mockResolvedValue(0), create: jest.fn() },
+      invoice: {
+        count: jest.fn().mockResolvedValue(0),
+        create: jest.fn(),
+        findUnique: jest.fn(),
+        update: jest.fn(),
+      },
+      invoiceItem: {
+        create: jest.fn().mockResolvedValue({}),
+        update: jest.fn().mockResolvedValue({}),
+        delete: jest.fn().mockResolvedValue({}),
+        findMany: jest.fn().mockResolvedValue([]),
+      },
       invoiceEvent: { create: jest.fn().mockResolvedValue({}) },
     };
     prisma = {
@@ -258,6 +293,246 @@ describe('InvoicesService', () => {
       await expect(service.findById('missing')).rejects.toBeInstanceOf(
         NotFoundException,
       );
+    });
+  });
+
+  /** Makes `tx.invoice.update` echo the persisted totals into a full model. */
+  const echoUpdatedInvoice = (items: unknown[]) =>
+    tx.invoice.update.mockImplementation(
+      ({ data }: { data: Record<string, unknown> }) =>
+        Promise.resolve(buildInvoice({ ...data, items })),
+    );
+
+  describe('addItem', () => {
+    it('adds an item, recomputes totals and writes ITEM_ADDED', async () => {
+      const existingItem = buildItem();
+      tx.invoice.findUnique.mockResolvedValue(
+        buildInvoice({
+          taxRate: new Prisma.Decimal(11),
+          items: [existingItem],
+        }),
+      );
+      const newItem = buildItem({
+        id: 'item-2',
+        description: 'Support',
+        quantity: new Prisma.Decimal(3),
+        unitPrice: new Prisma.Decimal(10),
+        lineTotal: new Prisma.Decimal(30),
+      });
+      tx.invoiceItem.findMany.mockResolvedValue([existingItem, newItem]);
+      echoUpdatedInvoice([existingItem, newItem]);
+
+      const result = await service.addItem(
+        invoiceId,
+        { description: 'Support', quantity: 3, unitPrice: 10 },
+        actorId,
+      );
+
+      const createArg = (
+        tx.invoiceItem.create.mock.calls as Array<
+          [{ data: { lineTotal: Prisma.Decimal; description: string } }]
+        >
+      )[0][0];
+      expect(createArg.data.description).toBe('Support');
+      expect(Number(createArg.data.lineTotal)).toBe(30);
+
+      const updateArg = (
+        tx.invoice.update.mock.calls as Array<
+          [
+            {
+              data: {
+                subtotal: Prisma.Decimal;
+                taxAmount: Prisma.Decimal;
+                total: Prisma.Decimal;
+              };
+            },
+          ]
+        >
+      )[0][0];
+      expect(Number(updateArg.data.subtotal)).toBe(331);
+      expect(Number(updateArg.data.taxAmount)).toBe(36.41);
+      expect(Number(updateArg.data.total)).toBe(367.41);
+
+      const eventArg = (
+        tx.invoiceEvent.create.mock.calls as Array<
+          [{ data: { type: string; actorUserId: string } }]
+        >
+      )[0][0];
+      expect(eventArg.data.type).toBe(InvoiceEventType.ITEM_ADDED);
+      expect(eventArg.data.actorUserId).toBe(actorId);
+
+      expect(result.total).toBe(367.41);
+      expect(result.items).toHaveLength(2);
+    });
+
+    it('rejects adding to a non-editable (PAID) invoice with 409', async () => {
+      tx.invoice.findUnique.mockResolvedValue(
+        buildInvoice({ status: InvoiceStatus.PAID }),
+      );
+
+      await expect(
+        service.addItem(invoiceId, {
+          description: 'Support',
+          quantity: 1,
+          unitPrice: 10,
+        }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.invoiceItem.create).not.toHaveBeenCalled();
+      expect(tx.invoiceEvent.create).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFound when the invoice does not exist', async () => {
+      tx.invoice.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.addItem(invoiceId, {
+          description: 'Support',
+          quantity: 1,
+          unitPrice: 10,
+        }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(tx.invoiceItem.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('updateItem', () => {
+    it('updates a line, recomputes totals and writes ITEM_UPDATED', async () => {
+      const item1 = buildItem();
+      const item2 = buildItem({
+        id: 'item-2',
+        description: 'Support',
+        quantity: new Prisma.Decimal(3),
+        unitPrice: new Prisma.Decimal(10),
+        lineTotal: new Prisma.Decimal(30),
+      });
+      tx.invoice.findUnique.mockResolvedValue(
+        buildInvoice({
+          taxRate: new Prisma.Decimal(11),
+          items: [item1, item2],
+        }),
+      );
+      // After bumping item1 to quantity 4: lineTotal 602.
+      const bumped = buildItem({
+        quantity: new Prisma.Decimal(4),
+        lineTotal: new Prisma.Decimal(602),
+      });
+      tx.invoiceItem.findMany.mockResolvedValue([bumped, item2]);
+      echoUpdatedInvoice([bumped, item2]);
+
+      const result = await service.updateItem(
+        invoiceId,
+        'item-1',
+        { quantity: 4 },
+        actorId,
+      );
+
+      const updateItemArg = (
+        tx.invoiceItem.update.mock.calls as Array<
+          [{ where: { id: string }; data: { lineTotal: Prisma.Decimal } }]
+        >
+      )[0][0];
+      expect(updateItemArg.where.id).toBe('item-1');
+      expect(Number(updateItemArg.data.lineTotal)).toBe(602);
+
+      const updateArg = (
+        tx.invoice.update.mock.calls as Array<
+          [{ data: { subtotal: Prisma.Decimal; total: Prisma.Decimal } }]
+        >
+      )[0][0];
+      expect(Number(updateArg.data.subtotal)).toBe(632); // 602 + 30
+      expect(Number(updateArg.data.total)).toBe(701.52); // 632 * 1.11
+
+      const eventArg = (
+        tx.invoiceEvent.create.mock.calls as Array<[{ data: { type: string } }]>
+      )[0][0];
+      expect(eventArg.data.type).toBe(InvoiceEventType.ITEM_UPDATED);
+      expect(result.total).toBe(701.52);
+    });
+
+    it('rejects updating on a non-editable (VOID) invoice with 409', async () => {
+      tx.invoice.findUnique.mockResolvedValue(
+        buildInvoice({ status: InvoiceStatus.VOID, items: [buildItem()] }),
+      );
+
+      await expect(
+        service.updateItem(invoiceId, 'item-1', { quantity: 4 }),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.invoiceItem.update).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFound when the item is not on the invoice', async () => {
+      tx.invoice.findUnique.mockResolvedValue(
+        buildInvoice({ items: [buildItem()] }),
+      );
+
+      await expect(
+        service.updateItem(invoiceId, 'item-999', { quantity: 4 }),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(tx.invoiceItem.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('removeItem', () => {
+    it('removes a line, recomputes totals and writes ITEM_REMOVED', async () => {
+      const item1 = buildItem();
+      const item2 = buildItem({
+        id: 'item-2',
+        description: 'Support',
+        quantity: new Prisma.Decimal(3),
+        unitPrice: new Prisma.Decimal(10),
+        lineTotal: new Prisma.Decimal(30),
+      });
+      tx.invoice.findUnique.mockResolvedValue(
+        buildInvoice({
+          taxRate: new Prisma.Decimal(11),
+          items: [item1, item2],
+        }),
+      );
+      tx.invoiceItem.findMany.mockResolvedValue([item1]);
+      echoUpdatedInvoice([item1]);
+
+      const result = await service.removeItem(invoiceId, 'item-2', actorId);
+
+      const deleteArg = (
+        tx.invoiceItem.delete.mock.calls as Array<[{ where: { id: string } }]>
+      )[0][0];
+      expect(deleteArg.where.id).toBe('item-2');
+
+      const updateArg = (
+        tx.invoice.update.mock.calls as Array<
+          [{ data: { subtotal: Prisma.Decimal; total: Prisma.Decimal } }]
+        >
+      )[0][0];
+      expect(Number(updateArg.data.subtotal)).toBe(301);
+      expect(Number(updateArg.data.total)).toBe(334.11); // 301 * 1.11
+
+      const eventArg = (
+        tx.invoiceEvent.create.mock.calls as Array<[{ data: { type: string } }]>
+      )[0][0];
+      expect(eventArg.data.type).toBe(InvoiceEventType.ITEM_REMOVED);
+      expect(result).toBeUndefined();
+    });
+
+    it('rejects removing from a non-editable (PAID) invoice with 409', async () => {
+      tx.invoice.findUnique.mockResolvedValue(
+        buildInvoice({ status: InvoiceStatus.PAID, items: [buildItem()] }),
+      );
+
+      await expect(
+        service.removeItem(invoiceId, 'item-1'),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(tx.invoiceItem.delete).not.toHaveBeenCalled();
+    });
+
+    it('throws NotFound when the item is not on the invoice', async () => {
+      tx.invoice.findUnique.mockResolvedValue(
+        buildInvoice({ items: [buildItem()] }),
+      );
+
+      await expect(
+        service.removeItem(invoiceId, 'item-999'),
+      ).rejects.toBeInstanceOf(NotFoundException);
+      expect(tx.invoiceItem.delete).not.toHaveBeenCalled();
     });
   });
 });

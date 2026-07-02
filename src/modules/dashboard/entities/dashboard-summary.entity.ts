@@ -34,6 +34,12 @@ export class InvoiceStatusCountsEntity {
 
 /** A compact invoice row for the dashboard's "recent activity" list. */
 export class RecentInvoiceEntity {
+  @ApiProperty({
+    example: '3f1c2d4e-5a6b-7c8d-9e0f-1a2b3c4d5e6f',
+    description: 'Invoice id — used to link through to the invoice detail.',
+  })
+  id: string;
+
   @ApiProperty({ example: 'INV-2026-0007' })
   number: string;
 

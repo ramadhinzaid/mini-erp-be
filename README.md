@@ -266,7 +266,7 @@ envelope, a `data` object with:
 | `outstanding`    | number                     | Σ `total` of outstanding invoices — `SENT` (including those derived as `OVERDUE`) and any persisted `OVERDUE`.                     |
 | `invoiceCounts`  | object                     | Count of invoices per display status: `DRAFT`, `SENT`, `PAID`, `VOID`, `OVERDUE`. Always present; each key defaults to `0`.        |
 | `customerCount`  | number                     | Number of **active** customers (`isActive = true`).                                                                               |
-| `recentInvoices` | array (max 5)              | The 5 latest invoices by `issueDate` (newest first): `number`, `customerName`, `total`, display `status`, `issueDate`.             |
+| `recentInvoices` | array (max 5)              | The 5 latest invoices by `issueDate` (newest first): `id`, `number`, `customerName`, `total`, display `status`, `issueDate`.       |
 
 **Derived `OVERDUE`.** There is no separate persisted OVERDUE lifecycle in the
 current schema: a `SENT` invoice whose `dueDate` has passed is *displayed* as

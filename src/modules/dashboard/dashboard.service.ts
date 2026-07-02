@@ -98,6 +98,7 @@ export class DashboardService {
         take: RECENT_INVOICE_LIMIT,
         orderBy: { issueDate: 'desc' },
         select: {
+          id: true,
           number: true,
           total: true,
           status: true,
@@ -145,6 +146,7 @@ export class DashboardService {
   /** Shapes a selected invoice row into the compact recent-invoice entity. */
   private toRecentInvoice(
     invoice: {
+      id: string;
       number: string;
       total: Prisma.Decimal | null;
       status: InvoiceStatus;
@@ -155,6 +157,7 @@ export class DashboardService {
     now: Date,
   ): RecentInvoiceEntity {
     return {
+      id: invoice.id,
       number: invoice.number,
       customerName: invoice.customer?.name ?? '',
       total: toNumber(invoice.total),

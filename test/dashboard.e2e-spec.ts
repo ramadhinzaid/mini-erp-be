@@ -123,6 +123,7 @@ describe('Dashboard (e2e)', () => {
       prismaStub.customer.count.mockResolvedValue(42);
       prismaStub.invoice.findMany.mockResolvedValue([
         {
+          id: 'inv-7',
           number: 'INV-2026-0007',
           total: 367.41,
           status: InvoiceStatus.SENT,
@@ -145,6 +146,7 @@ describe('Dashboard (e2e)', () => {
           invoiceCounts: Record<string, number>;
           customerCount: number;
           recentInvoices: Array<{
+            id: string;
             number: string;
             customerName: string;
             total: number;
@@ -166,6 +168,7 @@ describe('Dashboard (e2e)', () => {
       });
       expect(body.data.recentInvoices).toHaveLength(1);
       expect(body.data.recentInvoices[0]).toMatchObject({
+        id: 'inv-7',
         number: 'INV-2026-0007',
         customerName: 'Acme Corporation',
         total: 367.41,

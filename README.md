@@ -198,6 +198,38 @@ delete) and belongs to a `Customer`. Reusable helpers `computeInvoiceTotals`
 (recompute totals) and `appendInvoiceEvent` (write an event within a
 transaction) are exported from `invoices.service.ts` for the follow-up plans.
 
+### Dashboard (`/api/dashboard`)
+
+Read-only KPI aggregation over the invoice and customer data, powering the
+frontend dashboard. Readable by **any authenticated user** (no role
+restriction). It reads exclusively through `PrismaService` using aggregate /
+`groupBy` queries, and degrades gracefully to zeroed/empty aggregates on an
+empty database (it never errors on empty tables).
+
+| Method & Path              | Roles | Description                                   |
+| -------------------------- | ----- | --------------------------------------------- |
+| `GET /dashboard/summary`   | —     | Aggregated KPIs (see metric definitions below) |
+
+`GET /api/dashboard/summary` returns, inside the standard `{ success, data }`
+envelope, a `data` object with:
+
+| Field            | Type                       | Definition                                                                                                                        |
+| ---------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `revenue`        | number                     | Σ `total` of all `PAID` invoices.                                                                                                 |
+| `outstanding`    | number                     | Σ `total` of outstanding invoices — `SENT` (including those derived as `OVERDUE`) and any persisted `OVERDUE`.                     |
+| `invoiceCounts`  | object                     | Count of invoices per display status: `DRAFT`, `SENT`, `PAID`, `VOID`, `OVERDUE`. Always present; each key defaults to `0`.        |
+| `customerCount`  | number                     | Number of **active** customers (`isActive = true`).                                                                               |
+| `recentInvoices` | array (max 5)              | The 5 latest invoices by `issueDate` (newest first): `number`, `customerName`, `total`, display `status`, `issueDate`.             |
+
+**Derived `OVERDUE`.** There is no separate persisted OVERDUE lifecycle in the
+current schema: a `SENT` invoice whose `dueDate` has passed is *displayed* as
+`OVERDUE`. In `invoiceCounts`, such invoices are moved out of the `SENT` bucket
+into `OVERDUE` (on top of any rows already persisted with the `OVERDUE` status);
+the `SENT` bucket therefore counts only sent-and-not-yet-due invoices. The same
+derivation is applied to each entry's `status` in `recentInvoices`. Money fields
+follow the invoice convention — Prisma `Decimal` values are exposed as plain
+numbers.
+
 ---
 
 ## Testing
@@ -231,6 +263,7 @@ src/
 │   ├── users/              # User CRUD, password hashing
 │   ├── customers/          # Customer CRUD (invoicing domain)
 │   ├── invoices/           # Invoice creation + retrieval (billing foundation)
+│   ├── dashboard/          # Aggregated KPI summary (invoices + customers)
 │   └── health/             # Liveness/readiness probe
 ├── app.module.ts           # Composition root; wires global guards/filters
 └── main.ts                 # Bootstrap: pipes, Swagger, security, shutdown hooks

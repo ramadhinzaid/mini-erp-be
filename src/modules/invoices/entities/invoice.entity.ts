@@ -20,8 +20,21 @@ export class InvoiceEntity {
   @ApiProperty({ format: 'uuid' })
   customerId: string;
 
-  @ApiProperty({ enum: InvoiceStatus, example: InvoiceStatus.DRAFT })
+  @ApiProperty({
+    enum: InvoiceStatus,
+    example: InvoiceStatus.DRAFT,
+    description: 'The stored lifecycle status. Never derived.',
+  })
   status: InvoiceStatus;
+
+  @ApiProperty({
+    enum: InvoiceStatus,
+    example: InvoiceStatus.DRAFT,
+    description:
+      'Status to display: equals `status`, except a SENT invoice past its ' +
+      'dueDate is reported as OVERDUE. Derived on read; never persisted.',
+  })
+  displayStatus: InvoiceStatus;
 
   @ApiProperty()
   issueDate: Date;
@@ -53,12 +66,21 @@ export class InvoiceEntity {
   @ApiProperty()
   updatedAt: Date;
 
-  static fromModel(invoice: InvoiceWithItems): InvoiceEntity {
+  /**
+   * Maps a Prisma invoice to its API shape. `displayStatus` defaults to the
+   * stored `status`; callers that want the derived OVERDUE view pass the result
+   * of `deriveDisplayStatus(invoice)` so reads surface it without mutating data.
+   */
+  static fromModel(
+    invoice: InvoiceWithItems,
+    displayStatus: InvoiceStatus = invoice.status,
+  ): InvoiceEntity {
     const entity = new InvoiceEntity();
     entity.id = invoice.id;
     entity.number = invoice.number;
     entity.customerId = invoice.customerId;
     entity.status = invoice.status;
+    entity.displayStatus = displayStatus;
     entity.issueDate = invoice.issueDate;
     entity.dueDate = invoice.dueDate;
     entity.notes = invoice.notes;

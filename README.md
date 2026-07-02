@@ -167,6 +167,7 @@ extend this same module and its schema.
 | `GET    /invoices`                   | —                 | List invoices (paginated & filterable)                            |
 | `GET    /invoices/:id`               | —                 | Get an invoice by id, including its items (`404` when missing)     |
 | `GET    /invoices/:id/events`        | —                 | Get an invoice's audit trail (`404` when missing)                 |
+| `PATCH  /invoices/:id/status`        | `ADMIN`,`MANAGER` | Transition the invoice status (`VOID` is `ADMIN`-only)            |
 | `POST   /invoices/:id/items`         | `ADMIN`,`MANAGER` | Add a line item; recomputes totals (`201`)                        |
 | `PATCH  /invoices/:id/items/:itemId` | `ADMIN`,`MANAGER` | Update a line item; recomputes totals (`200`)                     |
 | `DELETE /invoices/:id/items/:itemId` | `ADMIN`,`MANAGER` | Remove a line item; recomputes totals (`204 No Content`)          |
@@ -183,6 +184,23 @@ Behaviour and rules:
   service derives every money field: `lineTotal = quantity × unitPrice`,
   `subtotal = Σ lineTotal`, `taxAmount = round(subtotal × taxRate ÷ 100, 2)` and
   `total = subtotal + taxAmount`.
+- **Status lifecycle.** `PATCH /invoices/:id/status` moves an invoice through a
+  fixed lifecycle. Body: `{ "status": "SENT" }`, validated against
+  `InvoiceStatus`. Allowed **manual** transitions:
+
+  | From    | Allowed target(s) |
+  | ------- | ----------------- |
+  | `DRAFT` | `SENT`, `VOID`    |
+  | `SENT`  | `PAID`, `VOID`    |
+  | `PAID`  | — (terminal)      |
+  | `VOID`  | — (terminal)      |
+
+  Any transition outside this matrix returns **`409 Conflict`**. `VOID` is
+  restricted to `ADMIN` (a `MANAGER` attempting it gets **`403`**); every other
+  transition is `ADMIN`/`MANAGER`. `OVERDUE` is **never set manually** — a
+  client-supplied `OVERDUE` is rejected with **`400`**. Each successful change
+  persists the new `status` and appends a `STATUS_CHANGED` `InvoiceEvent`
+  (`fromStatus`, `toStatus`, `actorUserId`).
 - **List (`GET /invoices`).** Returns a `PaginatedResult` ordered by `issueDate`
   descending. Each row carries the money totals, the owning `customer`
   (`{ id, name }`) and a derived `displayStatus`. Query parameters (all
@@ -198,10 +216,11 @@ Behaviour and rules:
   | `issuedFrom` | ISO date               | Only invoices issued on/after this instant         |
   | `issuedTo`   | ISO date               | Only invoices issued on/before this instant        |
 
-- **Derived `OVERDUE`.** `displayStatus` is computed from the stored status and
-  the due date via `deriveDisplayStatus`: a `SENT` (or already `OVERDUE`)
-  invoice whose `dueDate` is in the past is shown as `OVERDUE`; `DRAFT`, `PAID`
-  and `VOID` are never overridden. The stored `status` is left unchanged.
+- **Derived `OVERDUE`.** Reads (`GET /invoices/:id`) and the list expose a
+  `displayStatus` alongside the stored `status`, computed via
+  `deriveDisplayStatus`: a `SENT` (or already `OVERDUE`) invoice whose `dueDate`
+  is in the past is shown as `OVERDUE`; `DRAFT`, `PAID` and `VOID` are never
+  overridden. The stored `status` is left unchanged and never written on read.
 - **Audit trail (`GET /invoices/:id/events`).** Returns the invoice's
   `InvoiceEvent[]` ordered by `createdAt` ascending (oldest first), enriched
   with the acting user's `actorEmail` when it can be resolved (`null` for
@@ -214,16 +233,17 @@ Behaviour and rules:
   `subtotal`/`taxAmount`/`total` via the shared totals helper, and appends the
   matching audit event. A missing invoice or item returns `404`.
 - **Audit trail.** Creation and every mutation are written as append-only
-  `InvoiceEvent` rows: `CREATED` on create and `ITEM_ADDED` / `ITEM_UPDATED` /
-  `ITEM_REMOVED` on the respective line-item mutations, each stamped with the
-  acting user.
+  `InvoiceEvent` rows: `CREATED` on create, `STATUS_CHANGED` on each status
+  transition, and `ITEM_ADDED` / `ITEM_UPDATED` / `ITEM_REMOVED` on the
+  respective line-item mutations, each stamped with the acting user.
 
 **Schema.** `Invoice` (status `DRAFT`/`SENT`/`PAID`/`VOID`/`OVERDUE`, defaulting
 to `DRAFT`) has many `InvoiceItem` and many `InvoiceEvent` rows (both cascade on
 delete) and belongs to a `Customer`. Reusable helpers `computeInvoiceTotals`
-(recompute totals), `appendInvoiceEvent` (write an event within a transaction)
-and `deriveDisplayStatus` (compute the derived `OVERDUE` display status) are
-exported from `invoices.service.ts` for the follow-up plans.
+(recompute totals), `appendInvoiceEvent` (write an event within a transaction),
+`isTransitionAllowed` (lifecycle matrix predicate) and `deriveDisplayStatus`
+(derive the `OVERDUE` display state) are exported from `invoices.service.ts` for
+the follow-up plans.
 
 ### Dashboard (`/api/dashboard`)
 

@@ -1,10 +1,13 @@
 import {
+  BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { InvoiceEventType, InvoiceStatus, Prisma } from '@prisma/client';
+import { InvoiceEventType, InvoiceStatus, Prisma, Role } from '@prisma/client';
 import { PaginatedResult } from 'src/common/dto/paginated-result';
+import { AuthenticatedUser } from 'src/common/types/authenticated-user';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
 import { CreateInvoiceItemDto } from './dto/create-invoice-item.dto';
@@ -87,6 +90,37 @@ export function appendInvoiceEvent(
       actorUserId: event.actorUserId ?? null,
     },
   });
+}
+
+/**
+ * The manual invoice status lifecycle. Each key lists the statuses it may
+ * transition to via `PATCH /invoices/:id/status`:
+ *
+ * - `DRAFT` → `SENT` | `VOID`
+ * - `SENT`  → `PAID` | `VOID`
+ * - `PAID`, `VOID` are terminal (no further transitions)
+ *
+ * `OVERDUE` is intentionally absent: it is a derived display state (a `SENT`
+ * invoice past its `dueDate`), never a manual target or a stored transition.
+ */
+const ALLOWED_TRANSITIONS: Readonly<Record<InvoiceStatus, InvoiceStatus[]>> = {
+  [InvoiceStatus.DRAFT]: [InvoiceStatus.SENT, InvoiceStatus.VOID],
+  [InvoiceStatus.SENT]: [InvoiceStatus.PAID, InvoiceStatus.VOID],
+  [InvoiceStatus.PAID]: [],
+  [InvoiceStatus.VOID]: [],
+  [InvoiceStatus.OVERDUE]: [],
+};
+
+/**
+ * Pure predicate for the status matrix above: `true` when moving an invoice
+ * `from` → `to` is a legal manual transition. Exported so both the service and
+ * its tests share a single source of truth for the lifecycle rules.
+ */
+export function isTransitionAllowed(
+  from: InvoiceStatus,
+  to: InvoiceStatus,
+): boolean {
+  return ALLOWED_TRANSITIONS[from]?.includes(to) ?? false;
 }
 
 /**
@@ -296,7 +330,63 @@ export class InvoicesService {
     if (!invoice) {
       throw new NotFoundException(`Invoice ${id} not found`);
     }
-    return InvoiceEntity.fromModel(invoice);
+    return InvoiceEntity.fromModel(invoice, deriveDisplayStatus(invoice));
+  }
+
+  /**
+   * Applies a manual status transition to an invoice in a single transaction:
+   * validates the move against the lifecycle matrix, persists the new status,
+   * and appends a `STATUS_CHANGED` audit event recording who changed what.
+   *
+   * Guard rails:
+   * - `OVERDUE` is a derived state and is rejected as manual input (`400`).
+   * - `VOID` is ADMIN-only (`403` for anyone else, e.g. a MANAGER).
+   * - Illegal transitions per the matrix throw `409 Conflict`.
+   */
+  async updateStatus(
+    id: string,
+    targetStatus: InvoiceStatus,
+    actor: AuthenticatedUser,
+  ): Promise<InvoiceEntity> {
+    if (targetStatus === InvoiceStatus.OVERDUE) {
+      throw new BadRequestException(
+        'OVERDUE is a derived status and cannot be set manually',
+      );
+    }
+    if (targetStatus === InvoiceStatus.VOID && actor.role !== Role.ADMIN) {
+      throw new ForbiddenException('Only an ADMIN can void an invoice');
+    }
+
+    const invoice = await this.prisma.$transaction(async (tx) => {
+      const existing = await tx.invoice.findUnique({ where: { id } });
+      if (!existing) {
+        throw new NotFoundException(`Invoice ${id} not found`);
+      }
+
+      if (!isTransitionAllowed(existing.status, targetStatus)) {
+        throw new ConflictException(
+          `Cannot transition invoice from ${existing.status} to ${targetStatus}`,
+        );
+      }
+
+      const updated = await tx.invoice.update({
+        where: { id },
+        data: { status: targetStatus },
+        include: { items: true },
+      });
+
+      await appendInvoiceEvent(tx, id, {
+        type: InvoiceEventType.STATUS_CHANGED,
+        fromStatus: existing.status,
+        toStatus: targetStatus,
+        message: `Status changed from ${existing.status} to ${targetStatus}`,
+        actorUserId: actor.id,
+      });
+
+      return updated;
+    });
+
+    return InvoiceEntity.fromModel(invoice, deriveDisplayStatus(invoice));
   }
 
   /**

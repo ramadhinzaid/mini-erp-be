@@ -156,14 +156,17 @@ List endpoints accept `?page=` and `?limit=` (1–100) and return a
 ### Invoices (`/api/invoices`)
 
 Invoices are the core of the ERP's billing domain. Any authenticated user may
-read them; creation is restricted to `ADMIN` / `MANAGER`. This module is the
-**foundation** — later features (add/update line items, status transitions, the
-event history and dashboards) extend this same module and its schema.
+read them (get-by-id, the paginated list and the per-invoice audit trail);
+creation is restricted to `ADMIN` / `MANAGER`. This module keeps growing —
+later features (add/update line items, status transitions and dashboards)
+extend this same module and its schema.
 
 | Method & Path                        | Roles             | Description                                                        |
 | ------------------------------------ | ----------------- | ----------------------------------------------------------------- |
 | `POST   /invoices`                   | `ADMIN`,`MANAGER` | Create an invoice with optional inline line items                 |
+| `GET    /invoices`                   | —                 | List invoices (paginated & filterable)                            |
 | `GET    /invoices/:id`               | —                 | Get an invoice by id, including its items (`404` when missing)     |
+| `GET    /invoices/:id/events`        | —                 | Get an invoice's audit trail (`404` when missing)                 |
 | `POST   /invoices/:id/items`         | `ADMIN`,`MANAGER` | Add a line item; recomputes totals (`201`)                        |
 | `PATCH  /invoices/:id/items/:itemId` | `ADMIN`,`MANAGER` | Update a line item; recomputes totals (`200`)                     |
 | `DELETE /invoices/:id/items/:itemId` | `ADMIN`,`MANAGER` | Remove a line item; recomputes totals (`204 No Content`)          |
@@ -180,6 +183,29 @@ Behaviour and rules:
   service derives every money field: `lineTotal = quantity × unitPrice`,
   `subtotal = Σ lineTotal`, `taxAmount = round(subtotal × taxRate ÷ 100, 2)` and
   `total = subtotal + taxAmount`.
+- **List (`GET /invoices`).** Returns a `PaginatedResult` ordered by `issueDate`
+  descending. Each row carries the money totals, the owning `customer`
+  (`{ id, name }`) and a derived `displayStatus`. Query parameters (all
+  optional, combined with AND):
+
+  | Param        | Type                   | Meaning                                            |
+  | ------------ | ---------------------- | -------------------------------------------------- |
+  | `page`       | integer ≥ 1 (def. `1`) | Page number                                        |
+  | `limit`      | integer 1–100 (def. `20`) | Items per page                                  |
+  | `status`     | `InvoiceStatus`        | Filter by the stored status                        |
+  | `customerId` | uuid                   | Filter by owning customer                          |
+  | `search`     | string                 | Case-insensitive match on the invoice number       |
+  | `issuedFrom` | ISO date               | Only invoices issued on/after this instant         |
+  | `issuedTo`   | ISO date               | Only invoices issued on/before this instant        |
+
+- **Derived `OVERDUE`.** `displayStatus` is computed from the stored status and
+  the due date via `deriveDisplayStatus`: a `SENT` (or already `OVERDUE`)
+  invoice whose `dueDate` is in the past is shown as `OVERDUE`; `DRAFT`, `PAID`
+  and `VOID` are never overridden. The stored `status` is left unchanged.
+- **Audit trail (`GET /invoices/:id/events`).** Returns the invoice's
+  `InvoiceEvent[]` ordered by `createdAt` ascending (oldest first), enriched
+  with the acting user's `actorEmail` when it can be resolved (`null` for
+  system-generated events or removed users). `404` when the invoice is missing.
 - **Line-item mutations.** `POST/PATCH/DELETE /invoices/:id/items[/:itemId]`
   (`ADMIN`/`MANAGER`) add, update and remove line items. Items may only be
   mutated while the invoice is **editable** (status `DRAFT` or `SENT`); mutating
@@ -195,8 +221,9 @@ Behaviour and rules:
 **Schema.** `Invoice` (status `DRAFT`/`SENT`/`PAID`/`VOID`/`OVERDUE`, defaulting
 to `DRAFT`) has many `InvoiceItem` and many `InvoiceEvent` rows (both cascade on
 delete) and belongs to a `Customer`. Reusable helpers `computeInvoiceTotals`
-(recompute totals) and `appendInvoiceEvent` (write an event within a
-transaction) are exported from `invoices.service.ts` for the follow-up plans.
+(recompute totals), `appendInvoiceEvent` (write an event within a transaction)
+and `deriveDisplayStatus` (compute the derived `OVERDUE` display status) are
+exported from `invoices.service.ts` for the follow-up plans.
 
 ### Dashboard (`/api/dashboard`)
 

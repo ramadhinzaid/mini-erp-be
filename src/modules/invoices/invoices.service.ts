@@ -5,18 +5,16 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import {
-  Invoice,
-  InvoiceEventType,
-  InvoiceStatus,
-  Prisma,
-  Role,
-} from '@prisma/client';
+import { InvoiceEventType, InvoiceStatus, Prisma, Role } from '@prisma/client';
+import { PaginatedResult } from 'src/common/dto/paginated-result';
 import { AuthenticatedUser } from 'src/common/types/authenticated-user';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
 import { CreateInvoiceItemDto } from './dto/create-invoice-item.dto';
+import { QueryInvoicesDto } from './dto/query-invoices.dto';
 import { UpdateInvoiceItemDto } from './dto/update-invoice-item.dto';
+import { InvoiceEventEntity } from './entities/invoice-event.entity';
+import { InvoiceListItemEntity } from './entities/invoice-list-item.entity';
 import { InvoiceEntity } from './entities/invoice.entity';
 
 /** A quantity/unit-price pair from which a line total is derived. */
@@ -126,20 +124,21 @@ export function isTransitionAllowed(
 }
 
 /**
- * Derives the status to display for an invoice without mutating stored data: a
- * `SENT` invoice whose `dueDate` is in the past reads as `OVERDUE`; every other
- * invoice reads as its stored `status`. Kept pure (the clock is injectable) so
- * reads/lists can surface OVERDUE consistently and tests stay deterministic.
+ * Derives the status shown to the user from the stored status and the due date.
+ * An invoice that has been issued (`SENT`, or already flagged `OVERDUE`) and is
+ * past its due date is displayed as `OVERDUE`; `DRAFT`, `PAID` and `VOID` are
+ * never overridden. Kept pure and exported so list/detail reads and later plans
+ * share one rule without duplicating it.
  */
 export function deriveDisplayStatus(
-  invoice: Pick<Invoice, 'status' | 'dueDate'>,
+  invoice: { status: InvoiceStatus; dueDate: Date | null },
   now: Date = new Date(),
 ): InvoiceStatus {
-  if (
-    invoice.status === InvoiceStatus.SENT &&
-    invoice.dueDate !== null &&
-    invoice.dueDate.getTime() < now.getTime()
-  ) {
+  const isOpen =
+    invoice.status === InvoiceStatus.SENT ||
+    invoice.status === InvoiceStatus.OVERDUE;
+
+  if (isOpen && invoice.dueDate && invoice.dueDate.getTime() < now.getTime()) {
     return InvoiceStatus.OVERDUE;
   }
   return invoice.status;
@@ -222,6 +221,104 @@ export class InvoicesService {
     });
 
     return InvoiceEntity.fromModel(invoice);
+  }
+
+  /**
+   * Returns a paginated, filtered list of invoices ordered by issue date
+   * (newest first). Each row carries its owning customer (id + name), the
+   * money totals and the derived `displayStatus` so `OVERDUE` surfaces without
+   * a write.
+   */
+  async findAll(
+    query: QueryInvoicesDto,
+  ): Promise<PaginatedResult<InvoiceListItemEntity>> {
+    const where = this.buildListWhere(query);
+    const now = new Date();
+
+    const [invoices, total] = await Promise.all([
+      this.prisma.invoice.findMany({
+        where,
+        skip: query.skip,
+        take: query.limit,
+        orderBy: { issueDate: 'desc' },
+        include: { customer: { select: { id: true, name: true } } },
+      }),
+      this.prisma.invoice.count({ where }),
+    ]);
+
+    const data = invoices.map((invoice) =>
+      InvoiceListItemEntity.fromModel(
+        invoice,
+        deriveDisplayStatus(invoice, now),
+      ),
+    );
+
+    return new PaginatedResult(data, total, query.page, query.limit);
+  }
+
+  /**
+   * Returns the audit trail for an invoice — its `InvoiceEvent` rows ordered by
+   * creation time (oldest first) — enriching each with the actor's email when
+   * the user can be resolved. Throws NotFound when the invoice is missing.
+   */
+  async findEvents(invoiceId: string): Promise<InvoiceEventEntity[]> {
+    const invoice = await this.prisma.invoice.findUnique({
+      where: { id: invoiceId },
+      select: { id: true },
+    });
+    if (!invoice) {
+      throw new NotFoundException(`Invoice ${invoiceId} not found`);
+    }
+
+    const events = await this.prisma.invoiceEvent.findMany({
+      where: { invoiceId },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const actorIds = [
+      ...new Set(
+        events
+          .map((event) => event.actorUserId)
+          .filter((id): id is string => id !== null),
+      ),
+    ];
+    const actors = actorIds.length
+      ? await this.prisma.user.findMany({
+          where: { id: { in: actorIds } },
+          select: { id: true, email: true },
+        })
+      : [];
+    const emailById = new Map(actors.map((user) => [user.id, user.email]));
+
+    return events.map((event) =>
+      InvoiceEventEntity.fromModel(
+        event,
+        event.actorUserId ? (emailById.get(event.actorUserId) ?? null) : null,
+      ),
+    );
+  }
+
+  /** Builds the AND-combined filter for the invoice list from the query. */
+  private buildListWhere(query: QueryInvoicesDto): Prisma.InvoiceWhereInput {
+    const where: Prisma.InvoiceWhereInput = {};
+
+    if (query.status) {
+      where.status = query.status;
+    }
+    if (query.customerId) {
+      where.customerId = query.customerId;
+    }
+    if (query.search) {
+      where.number = { contains: query.search, mode: 'insensitive' };
+    }
+    if (query.issuedFrom || query.issuedTo) {
+      where.issueDate = {
+        ...(query.issuedFrom ? { gte: new Date(query.issuedFrom) } : {}),
+        ...(query.issuedTo ? { lte: new Date(query.issuedTo) } : {}),
+      };
+    }
+
+    return where;
   }
 
   /** Returns an invoice with its line items, or throws NotFound. */

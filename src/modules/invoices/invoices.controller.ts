@@ -9,6 +9,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Role } from '@prisma/client';
@@ -17,14 +18,15 @@ import { Roles } from 'src/common/decorators/roles.decorator';
 import type { AuthenticatedUser } from 'src/common/types/authenticated-user';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
 import { CreateInvoiceItemDto } from './dto/create-invoice-item.dto';
+import { QueryInvoicesDto } from './dto/query-invoices.dto';
 import { UpdateInvoiceItemDto } from './dto/update-invoice-item.dto';
 import { UpdateInvoiceStatusDto } from './dto/update-invoice-status.dto';
 import { InvoicesService } from './invoices.service';
 
 /**
- * HTTP surface for the invoice domain. Kept intentionally minimal — this is the
- * foundation; listing, item mutations, status transitions and events arrive in
- * later plans.
+ * HTTP surface for the invoice domain. Mutations (create/items/status) are
+ * ADMIN / MANAGER; the read endpoints — get-by-id, the paginated list and the
+ * per-invoice audit trail — are open to any authenticated user.
  */
 @ApiTags('Invoices')
 @ApiBearerAuth()
@@ -39,6 +41,15 @@ export class InvoicesController {
   })
   create(@Body() dto: CreateInvoiceDto, @CurrentUser('id') userId: string) {
     return this.invoicesService.create(dto, userId);
+  }
+
+  @Get()
+  @ApiOperation({
+    summary:
+      'List invoices (paginated; filter by status, customer, number, date range)',
+  })
+  findAll(@Query() query: QueryInvoicesDto) {
+    return this.invoicesService.findAll(query);
   }
 
   @Get(':id')
@@ -63,6 +74,14 @@ export class InvoicesController {
     @CurrentUser() actor: AuthenticatedUser,
   ) {
     return this.invoicesService.updateStatus(id, dto.status, actor);
+  }
+
+  @Get(':id/events')
+  @ApiOperation({
+    summary: 'Get an invoice audit trail (events ordered oldest first)',
+  })
+  findEvents(@Param('id', ParseUUIDPipe) id: string) {
+    return this.invoicesService.findEvents(id);
   }
 
   @Post(':id/items')

@@ -156,14 +156,17 @@ List endpoints accept `?page=` and `?limit=` (1–100) and return a
 ### Invoices (`/api/invoices`)
 
 Invoices are the core of the ERP's billing domain. Any authenticated user may
-read them; creation is restricted to `ADMIN` / `MANAGER`. This module is the
-**foundation** — later features (add/update line items, status transitions, the
-event history and dashboards) extend this same module and its schema.
+read them (get-by-id, the paginated list and the per-invoice audit trail);
+creation is restricted to `ADMIN` / `MANAGER`. This module keeps growing —
+later features (add/update line items, status transitions and dashboards)
+extend this same module and its schema.
 
 | Method & Path                        | Roles             | Description                                                        |
 | ------------------------------------ | ----------------- | ----------------------------------------------------------------- |
 | `POST   /invoices`                   | `ADMIN`,`MANAGER` | Create an invoice with optional inline line items                 |
+| `GET    /invoices`                   | —                 | List invoices (paginated & filterable)                            |
 | `GET    /invoices/:id`               | —                 | Get an invoice by id, including its items (`404` when missing)     |
+| `GET    /invoices/:id/events`        | —                 | Get an invoice's audit trail (`404` when missing)                 |
 | `PATCH  /invoices/:id/status`        | `ADMIN`,`MANAGER` | Transition the invoice status (`VOID` is `ADMIN`-only)            |
 | `POST   /invoices/:id/items`         | `ADMIN`,`MANAGER` | Add a line item; recomputes totals (`201`)                        |
 | `PATCH  /invoices/:id/items/:itemId` | `ADMIN`,`MANAGER` | Update a line item; recomputes totals (`200`)                     |
@@ -198,10 +201,30 @@ Behaviour and rules:
   client-supplied `OVERDUE` is rejected with **`400`**. Each successful change
   persists the new `status` and appends a `STATUS_CHANGED` `InvoiceEvent`
   (`fromStatus`, `toStatus`, `actorUserId`).
-- **Derived `OVERDUE`.** Reads (`GET /invoices/:id`) expose a `displayStatus`
-  alongside the stored `status`: a `SENT` invoice whose `dueDate` is in the past
-  reads as `OVERDUE`, while `status` keeps its stored value. This is computed on
-  read via `deriveDisplayStatus` and never written to the database.
+- **List (`GET /invoices`).** Returns a `PaginatedResult` ordered by `issueDate`
+  descending. Each row carries the money totals, the owning `customer`
+  (`{ id, name }`) and a derived `displayStatus`. Query parameters (all
+  optional, combined with AND):
+
+  | Param        | Type                   | Meaning                                            |
+  | ------------ | ---------------------- | -------------------------------------------------- |
+  | `page`       | integer ≥ 1 (def. `1`) | Page number                                        |
+  | `limit`      | integer 1–100 (def. `20`) | Items per page                                  |
+  | `status`     | `InvoiceStatus`        | Filter by the stored status                        |
+  | `customerId` | uuid                   | Filter by owning customer                          |
+  | `search`     | string                 | Case-insensitive match on the invoice number       |
+  | `issuedFrom` | ISO date               | Only invoices issued on/after this instant         |
+  | `issuedTo`   | ISO date               | Only invoices issued on/before this instant        |
+
+- **Derived `OVERDUE`.** Reads (`GET /invoices/:id`) and the list expose a
+  `displayStatus` alongside the stored `status`, computed via
+  `deriveDisplayStatus`: a `SENT` (or already `OVERDUE`) invoice whose `dueDate`
+  is in the past is shown as `OVERDUE`; `DRAFT`, `PAID` and `VOID` are never
+  overridden. The stored `status` is left unchanged and never written on read.
+- **Audit trail (`GET /invoices/:id/events`).** Returns the invoice's
+  `InvoiceEvent[]` ordered by `createdAt` ascending (oldest first), enriched
+  with the acting user's `actorEmail` when it can be resolved (`null` for
+  system-generated events or removed users). `404` when the invoice is missing.
 - **Line-item mutations.** `POST/PATCH/DELETE /invoices/:id/items[/:itemId]`
   (`ADMIN`/`MANAGER`) add, update and remove line items. Items may only be
   mutated while the invoice is **editable** (status `DRAFT` or `SENT`); mutating

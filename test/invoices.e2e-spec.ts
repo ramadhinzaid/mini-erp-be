@@ -95,6 +95,7 @@ describe('Invoices (e2e)', () => {
         ({ where: { email } }: { where: { email: string } }) =>
           Promise.resolve(usersByEmail[email] ?? null),
       ),
+      findMany: jest.fn(),
     },
     customer: { findUnique: jest.fn() },
     invoice: {
@@ -102,6 +103,7 @@ describe('Invoices (e2e)', () => {
       create: jest.fn(),
       findUnique: jest.fn(),
       update: jest.fn(),
+      findMany: jest.fn(),
     },
     invoiceItem: {
       create: jest.fn(),
@@ -109,7 +111,7 @@ describe('Invoices (e2e)', () => {
       delete: jest.fn(),
       findMany: jest.fn(),
     },
-    invoiceEvent: { create: jest.fn() },
+    invoiceEvent: { create: jest.fn(), findMany: jest.fn() },
     $transaction: jest.fn(),
   };
 
@@ -157,11 +159,14 @@ describe('Invoices (e2e)', () => {
     prismaStub.invoice.create.mockReset();
     prismaStub.invoice.findUnique.mockReset();
     prismaStub.invoice.update.mockReset();
+    prismaStub.invoice.findMany.mockReset();
     prismaStub.invoiceItem.create.mockReset();
     prismaStub.invoiceItem.update.mockReset();
     prismaStub.invoiceItem.delete.mockReset();
     prismaStub.invoiceItem.findMany.mockReset();
     prismaStub.invoiceEvent.create.mockReset();
+    prismaStub.invoiceEvent.findMany.mockReset();
+    prismaStub.user.findMany.mockReset();
     // Run service transactions against the same stub.
     prismaStub.$transaction.mockImplementation(
       (cb: (client: typeof prismaStub) => unknown) => cb(prismaStub),
@@ -180,6 +185,16 @@ describe('Invoices (e2e)', () => {
 
     it('GET /api/invoices/:id without a token → 401', () => {
       return request(server()).get(`/api/invoices/${invoiceId}`).expect(401);
+    });
+
+    it('GET /api/invoices without a token → 401', () => {
+      return request(server()).get('/api/invoices').expect(401);
+    });
+
+    it('GET /api/invoices/:id/events without a token → 401', () => {
+      return request(server())
+        .get(`/api/invoices/${invoiceId}/events`)
+        .expect(401);
     });
   });
 
@@ -469,6 +484,187 @@ describe('Invoices (e2e)', () => {
         .set('Authorization', `Bearer ${token}`)
         .send({ status: InvoiceStatus.SENT })
         .expect(404);
+    });
+  });
+
+  describe('findAll (list)', () => {
+    const buildListRow = (overrides: Record<string, unknown> = {}) => ({
+      ...buildInvoice(),
+      customer: { id: customerId, name: 'Acme Corp' },
+      items: undefined,
+      ...overrides,
+    });
+
+    it('any authenticated USER lists invoices → 200 paginated with customer, total & displayStatus', async () => {
+      const token = await tokenFor(regularUser);
+      prismaStub.invoice.findMany.mockResolvedValue([
+        buildListRow({
+          status: InvoiceStatus.SENT,
+          dueDate: new Date('2000-01-01T00:00:00Z'),
+        }),
+      ]);
+      prismaStub.invoice.count.mockResolvedValue(1);
+
+      const res = await request(server())
+        .get('/api/invoices')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+
+      const body = res.body as {
+        data: {
+          data: Array<{
+            id: string;
+            status: string;
+            displayStatus: string;
+            total: number;
+            customer: { id: string; name: string };
+          }>;
+          meta: {
+            page: number;
+            limit: number;
+            total: number;
+            totalPages: number;
+          };
+        };
+      };
+      expect(body.data.data).toHaveLength(1);
+      expect(body.data.data[0].customer).toEqual({
+        id: customerId,
+        name: 'Acme Corp',
+      });
+      expect(body.data.data[0].total).toBe(367.41);
+      expect(body.data.data[0].status).toBe(InvoiceStatus.SENT);
+      expect(body.data.data[0].displayStatus).toBe(InvoiceStatus.OVERDUE);
+      expect(body.data.meta).toEqual({
+        page: 1,
+        limit: 20,
+        total: 1,
+        totalPages: 1,
+      });
+    });
+
+    it('passes status/customer/search/date filters and pagination through to Prisma', async () => {
+      const token = await tokenFor(regularUser);
+      prismaStub.invoice.findMany.mockResolvedValue([]);
+      prismaStub.invoice.count.mockResolvedValue(0);
+
+      await request(server())
+        .get('/api/invoices')
+        .query({
+          page: 2,
+          limit: 5,
+          status: InvoiceStatus.PAID,
+          customerId,
+          search: 'INV-2026',
+          issuedFrom: '2026-01-01T00:00:00.000Z',
+          issuedTo: '2026-12-31T23:59:59.999Z',
+        })
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+
+      const findManyCalls = prismaStub.invoice.findMany.mock.calls as Array<
+        [
+          {
+            where: Record<string, unknown>;
+            skip: number;
+            take: number;
+            orderBy: unknown;
+          },
+        ]
+      >;
+      const call = findManyCalls[0][0];
+      expect(call.where).toEqual({
+        status: InvoiceStatus.PAID,
+        customerId,
+        number: { contains: 'INV-2026', mode: 'insensitive' },
+        issueDate: {
+          gte: new Date('2026-01-01T00:00:00.000Z'),
+          lte: new Date('2026-12-31T23:59:59.999Z'),
+        },
+      });
+      expect(call.skip).toBe(5);
+      expect(call.take).toBe(5);
+      expect(call.orderBy).toEqual({ issueDate: 'desc' });
+    });
+
+    it('rejects an invalid status filter → 400', async () => {
+      const token = await tokenFor(regularUser);
+      await request(server())
+        .get('/api/invoices')
+        .query({ status: 'NOPE' })
+        .set('Authorization', `Bearer ${token}`)
+        .expect(400);
+    });
+  });
+
+  describe('findEvents (audit trail)', () => {
+    const buildEvent = (overrides: Record<string, unknown> = {}) => ({
+      id: '66666666-6666-4666-8666-666666666666',
+      invoiceId,
+      type: 'CREATED',
+      fromStatus: null,
+      toStatus: InvoiceStatus.DRAFT,
+      message: 'Invoice INV-2026-0001 created',
+      actorUserId: null,
+      createdAt: new Date('2026-07-01T00:00:00Z'),
+      ...overrides,
+    });
+
+    it('any authenticated USER reads the audit trail → 200 ordered with actor email', async () => {
+      const token = await tokenFor(regularUser);
+      prismaStub.invoice.findUnique.mockResolvedValue({ id: invoiceId });
+      prismaStub.invoiceEvent.findMany.mockResolvedValue([
+        buildEvent({ actorUserId: admin.id }),
+        buildEvent({
+          id: '77777777-7777-4777-8777-777777777777',
+          type: 'STATUS_CHANGED',
+          createdAt: new Date('2026-07-02T00:00:00Z'),
+        }),
+      ]);
+      prismaStub.user.findMany.mockResolvedValue([
+        { id: admin.id, email: admin.email },
+      ]);
+
+      const res = await request(server())
+        .get(`/api/invoices/${invoiceId}/events`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(200);
+
+      const body = res.body as {
+        data: Array<{
+          id: string;
+          type: string;
+          actorUserId: string | null;
+          actorEmail: string | null;
+        }>;
+      };
+      expect(body.data).toHaveLength(2);
+      expect(body.data[0].type).toBe('CREATED');
+      expect(body.data[0].actorEmail).toBe(admin.email);
+      expect(body.data[1].actorEmail).toBeNull();
+      expect(prismaStub.invoiceEvent.findMany).toHaveBeenCalledWith({
+        where: { invoiceId },
+        orderBy: { createdAt: 'asc' },
+      });
+    });
+
+    it('returns 404 when the invoice does not exist', async () => {
+      const token = await tokenFor(regularUser);
+      prismaStub.invoice.findUnique.mockResolvedValue(null);
+
+      await request(server())
+        .get(`/api/invoices/${invoiceId}/events`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(404);
+      expect(prismaStub.invoiceEvent.findMany).not.toHaveBeenCalled();
+    });
+
+    it('rejects a non-UUID id → 400', async () => {
+      const token = await tokenFor(regularUser);
+      await request(server())
+        .get('/api/invoices/not-a-uuid/events')
+        .set('Authorization', `Bearer ${token}`)
+        .expect(400);
     });
   });
 

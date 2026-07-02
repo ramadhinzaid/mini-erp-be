@@ -160,10 +160,13 @@ read them; creation is restricted to `ADMIN` / `MANAGER`. This module is the
 **foundation** — later features (add/update line items, status transitions, the
 event history and dashboards) extend this same module and its schema.
 
-| Method & Path          | Roles             | Description                                              |
-| ---------------------- | ----------------- | ------------------------------------------------------- |
-| `POST /invoices`       | `ADMIN`,`MANAGER` | Create an invoice with optional inline line items       |
-| `GET  /invoices/:id`   | —                 | Get an invoice by id, including its items (`404` when missing) |
+| Method & Path                        | Roles             | Description                                                        |
+| ------------------------------------ | ----------------- | ----------------------------------------------------------------- |
+| `POST   /invoices`                   | `ADMIN`,`MANAGER` | Create an invoice with optional inline line items                 |
+| `GET    /invoices/:id`               | —                 | Get an invoice by id, including its items (`404` when missing)     |
+| `POST   /invoices/:id/items`         | `ADMIN`,`MANAGER` | Add a line item; recomputes totals (`201`)                        |
+| `PATCH  /invoices/:id/items/:itemId` | `ADMIN`,`MANAGER` | Update a line item; recomputes totals (`200`)                     |
+| `DELETE /invoices/:id/items/:itemId` | `ADMIN`,`MANAGER` | Remove a line item; recomputes totals (`204 No Content`)          |
 
 Behaviour and rules:
 
@@ -177,8 +180,17 @@ Behaviour and rules:
   service derives every money field: `lineTotal = quantity × unitPrice`,
   `subtotal = Σ lineTotal`, `taxAmount = round(subtotal × taxRate ÷ 100, 2)` and
   `total = subtotal + taxAmount`.
-- **Audit trail.** Creation and every future mutation are written as append-only
-  `InvoiceEvent` rows; this plan records the initial `CREATED` event.
+- **Line-item mutations.** `POST/PATCH/DELETE /invoices/:id/items[/:itemId]`
+  (`ADMIN`/`MANAGER`) add, update and remove line items. Items may only be
+  mutated while the invoice is **editable** (status `DRAFT` or `SENT`); mutating
+  a `PAID`/`VOID`/`OVERDUE` invoice returns `409 Conflict`. Each mutation runs in
+  a transaction that re-derives `lineTotal` (`quantity × unitPrice`), recomputes
+  `subtotal`/`taxAmount`/`total` via the shared totals helper, and appends the
+  matching audit event. A missing invoice or item returns `404`.
+- **Audit trail.** Creation and every mutation are written as append-only
+  `InvoiceEvent` rows: `CREATED` on create and `ITEM_ADDED` / `ITEM_UPDATED` /
+  `ITEM_REMOVED` on the respective line-item mutations, each stamped with the
+  acting user.
 
 **Schema.** `Invoice` (status `DRAFT`/`SENT`/`PAID`/`VOID`/`OVERDUE`, defaulting
 to `DRAFT`) has many `InvoiceItem` and many `InvoiceEvent` rows (both cascade on

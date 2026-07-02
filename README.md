@@ -161,12 +161,15 @@ creation is restricted to `ADMIN` / `MANAGER`. This module keeps growing —
 later features (add/update line items, status transitions and dashboards)
 extend this same module and its schema.
 
-| Method & Path                | Roles             | Description                                              |
-| ---------------------------- | ----------------- | ------------------------------------------------------- |
-| `POST /invoices`             | `ADMIN`,`MANAGER` | Create an invoice with optional inline line items       |
-| `GET  /invoices`             | —                 | List invoices (paginated & filterable)                  |
-| `GET  /invoices/:id`         | —                 | Get an invoice by id, including its items (`404` when missing) |
-| `GET  /invoices/:id/events`  | —                 | Get an invoice's audit trail (`404` when missing)       |
+| Method & Path                        | Roles             | Description                                                        |
+| ------------------------------------ | ----------------- | ----------------------------------------------------------------- |
+| `POST   /invoices`                   | `ADMIN`,`MANAGER` | Create an invoice with optional inline line items                 |
+| `GET    /invoices`                   | —                 | List invoices (paginated & filterable)                            |
+| `GET    /invoices/:id`               | —                 | Get an invoice by id, including its items (`404` when missing)     |
+| `GET    /invoices/:id/events`        | —                 | Get an invoice's audit trail (`404` when missing)                 |
+| `POST   /invoices/:id/items`         | `ADMIN`,`MANAGER` | Add a line item; recomputes totals (`201`)                        |
+| `PATCH  /invoices/:id/items/:itemId` | `ADMIN`,`MANAGER` | Update a line item; recomputes totals (`200`)                     |
+| `DELETE /invoices/:id/items/:itemId` | `ADMIN`,`MANAGER` | Remove a line item; recomputes totals (`204 No Content`)          |
 
 Behaviour and rules:
 
@@ -203,8 +206,17 @@ Behaviour and rules:
   `InvoiceEvent[]` ordered by `createdAt` ascending (oldest first), enriched
   with the acting user's `actorEmail` when it can be resolved (`null` for
   system-generated events or removed users). `404` when the invoice is missing.
-- **Audit trail.** Creation and every future mutation are written as append-only
-  `InvoiceEvent` rows; this plan records the initial `CREATED` event.
+- **Line-item mutations.** `POST/PATCH/DELETE /invoices/:id/items[/:itemId]`
+  (`ADMIN`/`MANAGER`) add, update and remove line items. Items may only be
+  mutated while the invoice is **editable** (status `DRAFT` or `SENT`); mutating
+  a `PAID`/`VOID`/`OVERDUE` invoice returns `409 Conflict`. Each mutation runs in
+  a transaction that re-derives `lineTotal` (`quantity × unitPrice`), recomputes
+  `subtotal`/`taxAmount`/`total` via the shared totals helper, and appends the
+  matching audit event. A missing invoice or item returns `404`.
+- **Audit trail.** Creation and every mutation are written as append-only
+  `InvoiceEvent` rows: `CREATED` on create and `ITEM_ADDED` / `ITEM_UPDATED` /
+  `ITEM_REMOVED` on the respective line-item mutations, each stamped with the
+  acting user.
 
 **Schema.** `Invoice` (status `DRAFT`/`SENT`/`PAID`/`VOID`/`OVERDUE`, defaulting
 to `DRAFT`) has many `InvoiceItem` and many `InvoiceEvent` rows (both cascade on
@@ -212,6 +224,38 @@ delete) and belongs to a `Customer`. Reusable helpers `computeInvoiceTotals`
 (recompute totals), `appendInvoiceEvent` (write an event within a transaction)
 and `deriveDisplayStatus` (compute the derived `OVERDUE` display status) are
 exported from `invoices.service.ts` for the follow-up plans.
+
+### Dashboard (`/api/dashboard`)
+
+Read-only KPI aggregation over the invoice and customer data, powering the
+frontend dashboard. Readable by **any authenticated user** (no role
+restriction). It reads exclusively through `PrismaService` using aggregate /
+`groupBy` queries, and degrades gracefully to zeroed/empty aggregates on an
+empty database (it never errors on empty tables).
+
+| Method & Path              | Roles | Description                                   |
+| -------------------------- | ----- | --------------------------------------------- |
+| `GET /dashboard/summary`   | —     | Aggregated KPIs (see metric definitions below) |
+
+`GET /api/dashboard/summary` returns, inside the standard `{ success, data }`
+envelope, a `data` object with:
+
+| Field            | Type                       | Definition                                                                                                                        |
+| ---------------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `revenue`        | number                     | Σ `total` of all `PAID` invoices.                                                                                                 |
+| `outstanding`    | number                     | Σ `total` of outstanding invoices — `SENT` (including those derived as `OVERDUE`) and any persisted `OVERDUE`.                     |
+| `invoiceCounts`  | object                     | Count of invoices per display status: `DRAFT`, `SENT`, `PAID`, `VOID`, `OVERDUE`. Always present; each key defaults to `0`.        |
+| `customerCount`  | number                     | Number of **active** customers (`isActive = true`).                                                                               |
+| `recentInvoices` | array (max 5)              | The 5 latest invoices by `issueDate` (newest first): `number`, `customerName`, `total`, display `status`, `issueDate`.             |
+
+**Derived `OVERDUE`.** There is no separate persisted OVERDUE lifecycle in the
+current schema: a `SENT` invoice whose `dueDate` has passed is *displayed* as
+`OVERDUE`. In `invoiceCounts`, such invoices are moved out of the `SENT` bucket
+into `OVERDUE` (on top of any rows already persisted with the `OVERDUE` status);
+the `SENT` bucket therefore counts only sent-and-not-yet-due invoices. The same
+derivation is applied to each entry's `status` in `recentInvoices`. Money fields
+follow the invoice convention — Prisma `Decimal` values are exposed as plain
+numbers.
 
 ---
 
@@ -246,6 +290,7 @@ src/
 │   ├── users/              # User CRUD, password hashing
 │   ├── customers/          # Customer CRUD (invoicing domain)
 │   ├── invoices/           # Invoice creation + retrieval (billing foundation)
+│   ├── dashboard/          # Aggregated KPI summary (invoices + customers)
 │   └── health/             # Liveness/readiness probe
 ├── app.module.ts           # Composition root; wires global guards/filters
 └── main.ts                 # Bootstrap: pipes, Swagger, security, shutdown hooks

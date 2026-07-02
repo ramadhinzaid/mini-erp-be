@@ -1,9 +1,15 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InvoiceEventType, InvoiceStatus, Prisma } from '@prisma/client';
 import { PaginatedResult } from 'src/common/dto/paginated-result';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
+import { CreateInvoiceItemDto } from './dto/create-invoice-item.dto';
 import { QueryInvoicesDto } from './dto/query-invoices.dto';
+import { UpdateInvoiceItemDto } from './dto/update-invoice-item.dto';
 import { InvoiceEventEntity } from './entities/invoice-event.entity';
 import { InvoiceListItemEntity } from './entities/invoice-list-item.entity';
 import { InvoiceEntity } from './entities/invoice.entity';
@@ -103,6 +109,16 @@ export function deriveDisplayStatus(
   }
   return invoice.status;
 }
+
+/**
+ * Statuses in which an invoice's line items may still be mutated. Adding,
+ * updating or removing items on any other status (PAID/VOID/OVERDUE) is a
+ * conflict — the invoice is considered locked.
+ */
+const EDITABLE_STATUSES: readonly InvoiceStatus[] = [
+  InvoiceStatus.DRAFT,
+  InvoiceStatus.SENT,
+];
 
 /**
  * Owns all business rules and persistence for invoices. This module is the
@@ -281,6 +297,196 @@ export class InvoicesService {
       throw new NotFoundException(`Invoice ${id} not found`);
     }
     return InvoiceEntity.fromModel(invoice);
+  }
+
+  /**
+   * Adds a line item to an editable invoice in a single transaction: computes
+   * the new line's `lineTotal`, recomputes the invoice's money totals, writes an
+   * `ITEM_ADDED` audit event, and returns the updated invoice with its items.
+   * 404 when the invoice is missing; 409 when it is not editable.
+   */
+  async addItem(
+    invoiceId: string,
+    dto: CreateInvoiceItemDto,
+    actorUserId?: string,
+  ): Promise<InvoiceEntity> {
+    const invoice = await this.prisma.$transaction(async (tx) => {
+      const existing = await this.loadEditableInvoice(tx, invoiceId);
+
+      const lineTotal = new Prisma.Decimal(dto.quantity)
+        .mul(dto.unitPrice)
+        .toDecimalPlaces(2);
+
+      await tx.invoiceItem.create({
+        data: {
+          invoiceId,
+          description: dto.description,
+          quantity: new Prisma.Decimal(dto.quantity),
+          unitPrice: new Prisma.Decimal(dto.unitPrice),
+          lineTotal,
+        },
+      });
+
+      const updated = await this.recomputeTotals(
+        tx,
+        invoiceId,
+        existing.taxRate,
+      );
+
+      await appendInvoiceEvent(tx, invoiceId, {
+        type: InvoiceEventType.ITEM_ADDED,
+        message: `Item "${dto.description}" added to ${existing.number}`,
+        actorUserId,
+      });
+
+      return updated;
+    });
+
+    return InvoiceEntity.fromModel(invoice);
+  }
+
+  /**
+   * Updates a line item on an editable invoice in a single transaction. Only the
+   * supplied fields change; `lineTotal` is re-derived from the resulting
+   * `quantity` * `unitPrice`. Recomputes invoice totals, writes an `ITEM_UPDATED`
+   * audit event, and returns the updated invoice with its items. 404 when the
+   * invoice or item is missing; 409 when the invoice is not editable.
+   */
+  async updateItem(
+    invoiceId: string,
+    itemId: string,
+    dto: UpdateInvoiceItemDto,
+    actorUserId?: string,
+  ): Promise<InvoiceEntity> {
+    const invoice = await this.prisma.$transaction(async (tx) => {
+      const existing = await this.loadEditableInvoice(tx, invoiceId);
+      const item = this.findItemOrThrow(existing, itemId);
+
+      const quantity =
+        dto.quantity !== undefined
+          ? new Prisma.Decimal(dto.quantity)
+          : item.quantity;
+      const unitPrice =
+        dto.unitPrice !== undefined
+          ? new Prisma.Decimal(dto.unitPrice)
+          : item.unitPrice;
+      const lineTotal = quantity.mul(unitPrice).toDecimalPlaces(2);
+
+      await tx.invoiceItem.update({
+        where: { id: itemId },
+        data: {
+          description: dto.description ?? undefined,
+          quantity,
+          unitPrice,
+          lineTotal,
+        },
+      });
+
+      const updated = await this.recomputeTotals(
+        tx,
+        invoiceId,
+        existing.taxRate,
+      );
+
+      await appendInvoiceEvent(tx, invoiceId, {
+        type: InvoiceEventType.ITEM_UPDATED,
+        message: `Item "${item.description}" updated on ${existing.number}`,
+        actorUserId,
+      });
+
+      return updated;
+    });
+
+    return InvoiceEntity.fromModel(invoice);
+  }
+
+  /**
+   * Removes a line item from an editable invoice in a single transaction:
+   * recomputes the invoice's money totals and writes an `ITEM_REMOVED` audit
+   * event. 404 when the invoice or item is missing; 409 when the invoice is not
+   * editable.
+   */
+  async removeItem(
+    invoiceId: string,
+    itemId: string,
+    actorUserId?: string,
+  ): Promise<void> {
+    await this.prisma.$transaction(async (tx) => {
+      const existing = await this.loadEditableInvoice(tx, invoiceId);
+      const item = this.findItemOrThrow(existing, itemId);
+
+      await tx.invoiceItem.delete({ where: { id: itemId } });
+
+      await this.recomputeTotals(tx, invoiceId, existing.taxRate);
+
+      await appendInvoiceEvent(tx, invoiceId, {
+        type: InvoiceEventType.ITEM_REMOVED,
+        message: `Item "${item.description}" removed from ${existing.number}`,
+        actorUserId,
+      });
+    });
+  }
+
+  /**
+   * Loads an invoice with its items for mutation, asserting it exists (404) and
+   * is in an editable status (409). Runs inside the caller's transaction.
+   */
+  private async loadEditableInvoice(
+    tx: Prisma.TransactionClient,
+    invoiceId: string,
+  ): Promise<Prisma.InvoiceGetPayload<{ include: { items: true } }>> {
+    const invoice = await tx.invoice.findUnique({
+      where: { id: invoiceId },
+      include: { items: true },
+    });
+    if (!invoice) {
+      throw new NotFoundException(`Invoice ${invoiceId} not found`);
+    }
+    if (!EDITABLE_STATUSES.includes(invoice.status)) {
+      throw new ConflictException(
+        `Invoice ${invoice.number} is ${invoice.status}; its items cannot be modified`,
+      );
+    }
+    return invoice;
+  }
+
+  /** Finds a line item on the loaded invoice, or throws NotFound. */
+  private findItemOrThrow(
+    invoice: Prisma.InvoiceGetPayload<{ include: { items: true } }>,
+    itemId: string,
+  ): Prisma.InvoiceItemGetPayload<true> {
+    const item = invoice.items.find((candidate) => candidate.id === itemId);
+    if (!item) {
+      throw new NotFoundException(
+        `Item ${itemId} not found on invoice ${invoice.id}`,
+      );
+    }
+    return item;
+  }
+
+  /**
+   * Recomputes and persists an invoice's `subtotal`/`taxAmount`/`total` from its
+   * current line items (via the shared {@link computeInvoiceTotals} helper) and
+   * returns the refreshed invoice with items. Runs inside the caller's
+   * transaction, after items have been added/updated/removed.
+   */
+  private async recomputeTotals(
+    tx: Prisma.TransactionClient,
+    invoiceId: string,
+    taxRate: Prisma.Decimal,
+  ): Promise<Prisma.InvoiceGetPayload<{ include: { items: true } }>> {
+    const items = await tx.invoiceItem.findMany({ where: { invoiceId } });
+    const totals = computeInvoiceTotals(items, taxRate);
+
+    return tx.invoice.update({
+      where: { id: invoiceId },
+      data: {
+        subtotal: totals.subtotal,
+        taxAmount: totals.taxAmount,
+        total: totals.total,
+      },
+      include: { items: true },
+    });
   }
 
   /**

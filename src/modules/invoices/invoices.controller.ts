@@ -1,9 +1,13 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   Query,
 } from '@nestjs/common';
@@ -12,7 +16,9 @@ import { Role } from '@prisma/client';
 import { CurrentUser } from 'src/common/decorators/current-user.decorator';
 import { Roles } from 'src/common/decorators/roles.decorator';
 import { CreateInvoiceDto } from './dto/create-invoice.dto';
+import { CreateInvoiceItemDto } from './dto/create-invoice-item.dto';
 import { QueryInvoicesDto } from './dto/query-invoices.dto';
+import { UpdateInvoiceItemDto } from './dto/update-invoice-item.dto';
 import { InvoicesService } from './invoices.service';
 
 /**
@@ -56,5 +62,52 @@ export class InvoicesController {
   })
   findEvents(@Param('id', ParseUUIDPipe) id: string) {
     return this.invoicesService.findEvents(id);
+  }
+
+  @Post(':id/items')
+  @Roles(Role.ADMIN, Role.MANAGER)
+  @ApiOperation({
+    summary:
+      'Add a line item to an editable invoice (admin/manager only); ' +
+      'recomputes totals. 409 when the invoice is not editable.',
+  })
+  addItem(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateInvoiceItemDto,
+    @CurrentUser('id') userId: string,
+  ) {
+    return this.invoicesService.addItem(id, dto, userId);
+  }
+
+  @Patch(':id/items/:itemId')
+  @Roles(Role.ADMIN, Role.MANAGER)
+  @ApiOperation({
+    summary:
+      'Update a line item on an editable invoice (admin/manager only); ' +
+      'recomputes totals. 409 when the invoice is not editable.',
+  })
+  updateItem(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('itemId', ParseUUIDPipe) itemId: string,
+    @Body() dto: UpdateInvoiceItemDto,
+    @CurrentUser('id') userId: string,
+  ) {
+    return this.invoicesService.updateItem(id, itemId, dto, userId);
+  }
+
+  @Delete(':id/items/:itemId')
+  @Roles(Role.ADMIN, Role.MANAGER)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @ApiOperation({
+    summary:
+      'Remove a line item from an editable invoice (admin/manager only); ' +
+      'recomputes totals. 409 when the invoice is not editable.',
+  })
+  removeItem(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('itemId', ParseUUIDPipe) itemId: string,
+    @CurrentUser('id') userId: string,
+  ) {
+    return this.invoicesService.removeItem(id, itemId, userId);
   }
 }

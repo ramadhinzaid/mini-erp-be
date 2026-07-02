@@ -102,6 +102,13 @@ describe('Invoices (e2e)', () => {
       count: jest.fn(),
       create: jest.fn(),
       findUnique: jest.fn(),
+      update: jest.fn(),
+      findMany: jest.fn(),
+    },
+    invoiceItem: {
+      create: jest.fn(),
+      update: jest.fn(),
+      delete: jest.fn(),
       findMany: jest.fn(),
     },
     invoiceEvent: { create: jest.fn(), findMany: jest.fn() },
@@ -151,7 +158,12 @@ describe('Invoices (e2e)', () => {
     prismaStub.invoice.count.mockReset();
     prismaStub.invoice.create.mockReset();
     prismaStub.invoice.findUnique.mockReset();
+    prismaStub.invoice.update.mockReset();
     prismaStub.invoice.findMany.mockReset();
+    prismaStub.invoiceItem.create.mockReset();
+    prismaStub.invoiceItem.update.mockReset();
+    prismaStub.invoiceItem.delete.mockReset();
+    prismaStub.invoiceItem.findMany.mockReset();
     prismaStub.invoiceEvent.create.mockReset();
     prismaStub.invoiceEvent.findMany.mockReset();
     prismaStub.user.findMany.mockReset();
@@ -497,6 +509,141 @@ describe('Invoices (e2e)', () => {
       await request(server())
         .get('/api/invoices/not-a-uuid/events')
         .set('Authorization', `Bearer ${token}`)
+        .expect(400);
+    });
+  });
+
+  describe('line-item mutations', () => {
+    const itemId = '44444444-4444-4444-8444-444444444444';
+
+    /** Arranges a DRAFT invoice plus recompute mocks for a successful mutation. */
+    const arrangeEditable = (resultTotals: Record<string, unknown>) => {
+      prismaStub.invoice.findUnique.mockResolvedValue(buildInvoice());
+      prismaStub.invoiceItem.create.mockResolvedValue({});
+      prismaStub.invoiceItem.update.mockResolvedValue({});
+      prismaStub.invoiceItem.delete.mockResolvedValue({});
+      prismaStub.invoiceItem.findMany.mockResolvedValue([]);
+      prismaStub.invoice.update.mockResolvedValue(buildInvoice(resultTotals));
+      prismaStub.invoiceEvent.create.mockResolvedValue({});
+    };
+
+    it('POST .../items adds a line and returns recomputed totals → 201', async () => {
+      const token = await tokenFor(admin);
+      arrangeEditable({
+        subtotal: 391,
+        taxAmount: 43.01,
+        total: 434.01,
+        items: [
+          ...buildInvoice().items,
+          {
+            id: '66666666-6666-4666-8666-666666666666',
+            invoiceId,
+            description: 'Training',
+            quantity: 6,
+            unitPrice: 10,
+            lineTotal: 60,
+            createdAt: new Date('2026-07-01T00:00:00Z'),
+            updatedAt: new Date('2026-07-01T00:00:00Z'),
+          },
+        ],
+      });
+
+      const res = await request(server())
+        .post(`/api/invoices/${invoiceId}/items`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ description: 'Training', quantity: 6, unitPrice: 10 })
+        .expect(201);
+
+      const body = res.body as {
+        data: { total: number; items: unknown[] };
+      };
+      expect(body.data.total).toBe(434.01);
+      expect(body.data.items).toHaveLength(3);
+      expect(prismaStub.invoiceItem.create).toHaveBeenCalledTimes(1);
+      expect(prismaStub.invoiceEvent.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('PATCH .../items/:itemId updates a line and returns totals → 200', async () => {
+      const token = await tokenFor(manager);
+      arrangeEditable({ subtotal: 130, taxAmount: 14.3, total: 144.3 });
+
+      const res = await request(server())
+        .patch(`/api/invoices/${invoiceId}/items/${itemId}`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ quantity: 5 })
+        .expect(200);
+
+      const body = res.body as { data: { total: number } };
+      expect(body.data.total).toBe(144.3);
+      expect(prismaStub.invoiceItem.update).toHaveBeenCalledTimes(1);
+      expect(prismaStub.invoiceEvent.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('DELETE .../items/:itemId removes a line → 204 (no body)', async () => {
+      const token = await tokenFor(admin);
+      arrangeEditable({ subtotal: 30, taxAmount: 3.3, total: 33.3 });
+
+      const res = await request(server())
+        .delete(`/api/invoices/${invoiceId}/items/${itemId}`)
+        .set('Authorization', `Bearer ${token}`)
+        .expect(204);
+
+      expect(res.body).toEqual({});
+      expect(prismaStub.invoiceItem.delete).toHaveBeenCalledTimes(1);
+      expect(prismaStub.invoiceEvent.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('POST .../items without a token → 401', () => {
+      return request(server())
+        .post(`/api/invoices/${invoiceId}/items`)
+        .send({ description: 'Training', quantity: 6, unitPrice: 10 })
+        .expect(401);
+    });
+
+    it('USER adding a line item → 403', async () => {
+      const token = await tokenFor(regularUser);
+      await request(server())
+        .post(`/api/invoices/${invoiceId}/items`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ description: 'Training', quantity: 6, unitPrice: 10 })
+        .expect(403);
+      expect(prismaStub.invoiceItem.create).not.toHaveBeenCalled();
+    });
+
+    it('adding a line item to a non-editable (PAID) invoice → 409', async () => {
+      const token = await tokenFor(admin);
+      prismaStub.invoice.findUnique.mockResolvedValue(
+        buildInvoice({ status: InvoiceStatus.PAID }),
+      );
+
+      await request(server())
+        .post(`/api/invoices/${invoiceId}/items`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ description: 'Training', quantity: 6, unitPrice: 10 })
+        .expect(409);
+      expect(prismaStub.invoiceItem.create).not.toHaveBeenCalled();
+    });
+
+    it('returns 404 when the target item is not on the invoice', async () => {
+      const token = await tokenFor(admin);
+      prismaStub.invoice.findUnique.mockResolvedValue(buildInvoice());
+
+      await request(server())
+        .patch(
+          `/api/invoices/${invoiceId}/items/77777777-7777-4777-8777-777777777777`,
+        )
+        .set('Authorization', `Bearer ${token}`)
+        .send({ quantity: 5 })
+        .expect(404);
+      expect(prismaStub.invoiceItem.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects a non-positive quantity when adding a line → 400', async () => {
+      const token = await tokenFor(admin);
+      await request(server())
+        .post(`/api/invoices/${invoiceId}/items`)
+        .set('Authorization', `Bearer ${token}`)
+        .send({ description: 'Bad', quantity: 0, unitPrice: 10 })
         .expect(400);
     });
   });

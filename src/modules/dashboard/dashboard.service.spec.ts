@@ -197,6 +197,7 @@ describe('DashboardService', () => {
     it('returns the latest invoices (limit 5) with a mapped, derived shape', async () => {
       prisma.invoice.findMany.mockResolvedValue([
         {
+          id: 'inv-7',
           number: 'INV-2026-0007',
           total: new Prisma.Decimal('367.41'),
           status: InvoiceStatus.SENT,
@@ -205,6 +206,7 @@ describe('DashboardService', () => {
           customer: { name: 'Acme Corporation' },
         },
         {
+          id: 'inv-6',
           number: 'INV-2026-0006',
           total: new Prisma.Decimal('100'),
           status: InvoiceStatus.PAID,
@@ -218,6 +220,7 @@ describe('DashboardService', () => {
 
       expect(summary.recentInvoices).toEqual([
         {
+          id: 'inv-7',
           number: 'INV-2026-0007',
           customerName: 'Acme Corporation',
           total: 367.41,
@@ -225,6 +228,7 @@ describe('DashboardService', () => {
           issueDate: new Date('2026-07-01T00:00:00Z'),
         },
         {
+          id: 'inv-6',
           number: 'INV-2026-0006',
           customerName: 'Globex',
           total: 100,
@@ -239,13 +243,14 @@ describe('DashboardService', () => {
           {
             take: number;
             orderBy: { issueDate: string };
-            select: { customer: { select: { name: boolean } } };
+            select: { id: boolean; customer: { select: { name: boolean } } };
           },
         ]
       >;
       const findArg = findCalls[0][0];
       expect(findArg.take).toBe(5);
       expect(findArg.orderBy).toEqual({ issueDate: 'desc' });
+      expect(findArg.select.id).toBe(true);
       expect(findArg.select.customer.select.name).toBe(true);
     });
   });

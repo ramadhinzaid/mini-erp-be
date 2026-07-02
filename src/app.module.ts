@@ -9,6 +9,7 @@ import configuration from './config/configuration';
 import { validateEnv } from './config/env.validation';
 import { AuthModule } from './modules/auth/auth.module';
 import { CustomersModule } from './modules/customers/customers.module';
+import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { HealthModule } from './modules/health/health.module';
 import { InvoicesModule } from './modules/invoices/invoices.module';
 import { UsersModule } from './modules/users/users.module';
@@ -28,6 +29,7 @@ import { PrismaModule } from './prisma/prisma.module';
     UsersModule,
     CustomersModule,
     InvoicesModule,
+    DashboardModule,
     HealthModule,
   ],
   providers: [
